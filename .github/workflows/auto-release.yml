@@ -16,36 +16,41 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get version from package.json
-        id: version
+      - name: Get current version from package.json
+        id: current-version
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Current version: $VERSION"
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "current-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
 
-      - name: Check if tag exists
-        id: tag-check
+      - name: Get previous version from git history
+        id: previous-version
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Tag v${{ steps.version.outputs.version }} already exists"
+          # Get the previous version from the last commit that changed package.json
+          PREVIOUS_COMMIT=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
+          if [ -n "$PREVIOUS_COMMIT" ]; then
+            PREVIOUS_VERSION=$(git show $PREVIOUS_COMMIT:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Tag v${{ steps.version.outputs.version }} does not exist"
+            PREVIOUS_VERSION="0.0.0"
           fi
+          echo "previous-version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
+          echo "Previous version: $PREVIOUS_VERSION"
 
-      - name: Create tag if needed
-        if: steps.tag-check.outputs.exists == 'false'
+      - name: Check if version has changed
+        id: version-changed
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          if [ "${{ steps.current-version.outputs.current-version }}" != "${{ steps.previous-version.outputs.previous-version }}" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Version has changed from ${{ steps.previous-version.outputs.previous-version }} to ${{ steps.current-version.outputs.current-version }}"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Version has not changed (${{ steps.current-version.outputs.current-version }})"
+          fi
 
   build:
     needs: check-version
     runs-on: macos-latest
-    if: needs.check-version.outputs.exists == 'false'
+    if: needs.check-version.outputs.changed == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -73,7 +78,7 @@ jobs:
   release:
     needs: [check-version, build]
     runs-on: ubuntu-latest
-    if: needs.check-version.outputs.exists == 'false'
+    if: needs.check-version.outputs.changed == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
