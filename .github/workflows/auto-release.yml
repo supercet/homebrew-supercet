@@ -79,6 +79,8 @@ jobs:
 
   release:
     needs: [check-version, build]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     if: needs.check-version.outputs.isVersionChanged == 'true'
     steps:
