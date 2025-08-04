@@ -117,7 +117,7 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           files: |
-            dist/bundle/supercet-node22-arm64
-            dist/bundle/supercet-node22-x64
+            dist/bundle/supercet-arm64
+            dist/bundle/supercet-x64
           draft: false
           prerelease: false
