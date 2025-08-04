@@ -121,3 +121,20 @@ jobs:
             dist/bundle/supercet-x64
           draft: false
           prerelease: false
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Update Homebrew Formula
+        run: |
+          ./scripts/update-formula.rb
+
+      - name: Commit and push formula updates
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add Formula/supercet.rb
+          git commit -m "Update formula for version ${{ steps.version.outputs.version }}"
+          git push

@@ -1,23 +1,23 @@
 class Supercet < Formula
   desc "Supercet - A Node.js application for git operations"
   homepage "https://github.com/supercet/homebrew-supercet"
-  url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.0/supercet-macos-arm64"
+  url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.0/supercet-arm64"
   sha256 "PLACEHOLDER_SHA256_ARM64"
   license "MIT"
 
   on_arm do
-    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.0/supercet-macos-arm64"
+    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.0/supercet-arm64"
     sha256 "PLACEHOLDER_SHA256_ARM64"
   end
 
   on_intel do
-    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.0/supercet-macos-x64"
+    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.0/supercet-x64"
     sha256 "PLACEHOLDER_SHA256_X64"
   end
 
   def install
     # Install the pre-compiled binary
-    bin.install "supercet-macos-#{Hardware::CPU.arm? ? "arm64" : "x64"}" => "supercet"
+    bin.install "supercet-#{Hardware::CPU.arm? ? "arm64" : "x64"}" => "supercet"
     chmod 0755, bin/"supercet"
   end
 
