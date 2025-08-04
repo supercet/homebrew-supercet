@@ -1,7 +1,7 @@
 {
   "name": "homebrew-supercet",
   "type": "module",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "esbuild src/index.ts --bundle --minify --platform=node --outfile=dist/supercet.js",
