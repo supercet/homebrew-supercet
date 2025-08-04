@@ -88,6 +88,6 @@ serve(
     port: 4444,
   },
   (info) => {
-    console.log(`Supercet Conduit is running on http://localhost:${info.port}`);
+    console.log(`Supercet is running on http://localhost:${info.port}`);
   }
 );

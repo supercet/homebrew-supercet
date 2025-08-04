@@ -1,0 +1,7 @@
+name: supercet
+full_name: Supercet Conduit
+description: Homebrew tap for the Supercet Conduit daemon
+homepage: https://supercet.com
+repository: https://github.com/supercet/supercet
+formulae:
+  - supercet
