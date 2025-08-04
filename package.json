@@ -4,18 +4,24 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --minify --platform=node --outfile=dist/index.js",
-    "start": "node dist/index.js"
+    "build": "esbuild src/index.ts --bundle --minify --platform=node --outfile=dist/supercet.js",
+    "start": "node dist/supercet.js",
+    "bundle": "pkg dist/supercet.js --compress GZip --out-path dist/bundle --targets node22-macos-arm64,node22-macos-x64",
+    "build-bundle": "npm run build && npm run bundle",
+    "tap:update": "ruby scripts/update-formula.rb",
+    "tap:test": "brew install --build-from-source ./Formula/supercet.rb",
+    "tap:uninstall": "brew uninstall supercet"
   },
   "dependencies": {
     "@hono/node-server": "^1.18.1",
-    "esbuild": "^0.25.8",
     "hono": "^4.8.12",
     "jsonwebtoken": "^9.0.2",
     "simple-git": "^3.28.0"
   },
   "devDependencies": {
+    "esbuild": "^0.25.8",
     "@types/node": "^20.11.17",
+    "@yao-pkg/pkg": "^6.6.0",
     "tsx": "^4.7.1",
     "typescript": "^5.8.3"
   },
