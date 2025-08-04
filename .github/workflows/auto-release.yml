@@ -91,9 +91,17 @@ jobs:
           name: binaries
           path: dist/bundle
 
+      - name: Get version for tag
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Creating release for version: $VERSION"
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: v${{ steps.version.outputs.version }}
           files: |
             dist/bundle/supercet-node22-macos-arm64
             dist/bundle/supercet-node22-macos-x64
