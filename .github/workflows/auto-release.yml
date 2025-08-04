@@ -10,6 +10,8 @@ on:
 jobs:
   check-version:
     runs-on: ubuntu-latest
+    outputs:
+      isVersionChanged: ${{ steps.version-changed.outputs.isVersionChanged }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,17 +42,17 @@ jobs:
         id: version-changed
         run: |
           if [ "${{ steps.current-version.outputs.current-version }}" != "${{ steps.previous-version.outputs.previous-version }}" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "isVersionChanged=true" >> $GITHUB_OUTPUT
             echo "Version has changed from ${{ steps.previous-version.outputs.previous-version }} to ${{ steps.current-version.outputs.current-version }}"
           else
-            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "isVersionChanged=false" >> $GITHUB_OUTPUT
             echo "Version has not changed (${{ steps.current-version.outputs.current-version }})"
           fi
 
   build:
     needs: check-version
     runs-on: macos-latest
-    if: needs.check-version.outputs.changed == 'true'
+    if: needs.check-version.outputs.isVersionChanged == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -78,7 +80,7 @@ jobs:
   release:
     needs: [check-version, build]
     runs-on: ubuntu-latest
-    if: needs.check-version.outputs.changed == 'true'
+    if: needs.check-version.outputs.isVersionChanged == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
