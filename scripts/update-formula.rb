@@ -10,8 +10,8 @@ version = package_json['version']
 puts "Updating formula for version #{version}"
 
 # URLs for the pre-compiled binaries
-arm64_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-macos-arm64"
-x64_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-macos-x64"
+arm64_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-arm64"
+x64_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-x64"
 
 puts "Calculating SHA256 for ARM64 binary..."
 arm64_sha256 = calculate_sha256(arm64_url)
@@ -26,7 +26,7 @@ formula_content = File.read(formula_path)
 # Update version and SHA256 values
 updated_content = formula_content.gsub(
   /url "https:\/\/github\.com\/supercet\/homebrew-supercet\/releases\/download\/v[^"]+"/,
-  "url \"https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-macos-arm64\""
+  "url \"https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-arm64\""
 ).gsub(
   /sha256 "PLACEHOLDER_SHA256_ARM64"/,
   "sha256 \"#{arm64_sha256}\""
