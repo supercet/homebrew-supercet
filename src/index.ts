@@ -9,6 +9,8 @@ import { postCommit } from "./git/commit";
 import { getCommits } from "./git/commits";
 import { getDiff } from "./git/diff";
 import { postPush } from "./git/push";
+import { getRemote } from "./git/remote";
+import { getRemotes } from "./git/remotes";
 import { postStage } from "./git/stage";
 import { getStatus } from "./git/status";
 import { postUnstage } from "./git/unstage";
@@ -84,7 +86,6 @@ app.use(
 
 // Authentication middleware
 app.use("*", async (c, next) => {
-  console.log("Authentication middleware starting");
   const authHeader = c.req.header("authorization");
 
   if (!authHeader) {
@@ -136,6 +137,8 @@ app.post("/api/git/push", postPush);
 app.post("/api/git/stage", postStage);
 app.get("/api/git/status", getStatus);
 app.post("/api/git/unstage", postUnstage);
+app.get("/api/git/remote", getRemote);
+app.get("/api/git/remotes", getRemotes);
 
 // Start server
 serve(
