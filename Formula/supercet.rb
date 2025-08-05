@@ -11,7 +11,7 @@ class Supercet < Formula
   end
 
   on_intel do
-    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.9/supercet-arm64"
+    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.9/supercet-x64"
     sha256 "3ea10fa7c2efb9213b3be9e42623d649ed21c996637db4fb380ad7abf47c093f"
   end
 
