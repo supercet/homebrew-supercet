@@ -22,6 +22,11 @@ class Supercet < Formula
     chmod 0755, bin/"supercet"
   end
 
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
+
   test do
     # Test that the binary exists and is executable
     assert_predicate bin/"supercet", :exist?

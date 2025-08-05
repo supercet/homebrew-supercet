@@ -58,7 +58,8 @@ async function checkForUpdates(): Promise<void> {
       console.log("🚀 A new version of Supercet is available!");
       console.log(`Current version: ${currentVersion}`);
       console.log(`Latest version:  ${latestVersion}`);
-      console.log("To upgrade, run: brew upgrade supercet");
+      console.log("To upgrade, run:");
+      console.log("brew update && brew upgrade supercet");
       console.log("=".repeat(60) + "\n");
     } else {
       console.log("✨ You are on the latest version of Supercet ✨");
