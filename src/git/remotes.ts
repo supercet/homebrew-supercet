@@ -9,7 +9,7 @@ export async function getRemotes(c: Context) {
       return c.json(null, 404);
     }
 
-    const remotesArray = remotes.split("\n");
+    const remotesArray = remotes.split("\n").filter((remote) => remote);
 
     return c.json(remotesArray);
   } catch (e) {
