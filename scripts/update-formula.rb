@@ -47,7 +47,13 @@ formula.gsub!(
   "url \"#{urls[:x64]}\""
 )
 
-# 2) Replace the three sha256 lines: first two → ARM, third → x64
+# 2) Update the version
+formula.gsub!(
+  /version\s+"[^"]+"/,
+  "version \"#{version}\""
+)
+
+# 3) Replace the three sha256 lines: first two → ARM, third → x64
 count = 0
 formula.gsub!(/sha256\s+"[a-f0-9]+"/) do
   count += 1
