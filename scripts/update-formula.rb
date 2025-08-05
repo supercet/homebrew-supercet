@@ -1,64 +1,63 @@
 #!/usr/bin/env ruby
-
-require 'net/http'
 require 'json'
+require 'open-uri'
+require 'digest'
 
-def calculate_sha256(url, version)
-  puts "Downloading and calculating SHA256 for: #{url}"
-  
-  # Use curl to download and pipe directly to shasum
-  # This avoids storing the full binary in memory
-  command = "curl -L -s '#{url}' | shasum -a 256"
-  
-  result = `#{command}`
-  
-  if $?.success?
-    # Extract just the hash (remove the trailing dash and newline)
-    sha256 = result.strip.split(' ').first
-    puts "Successfully calculated SHA256: #{sha256}"
-    return sha256
+PACKAGE_JSON = 'package.json'
+FORMULA      = 'Formula/supercet.rb'
+
+unless File.exist?(PACKAGE_JSON)
+  abort "Error: #{PACKAGE_JSON} not found."
+end
+
+version = JSON.parse(File.read(PACKAGE_JSON))['version']
+puts "→ Detected version: #{version}"
+
+base_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}"
+urls = {
+  arm:  "#{base_url}/supercet-arm64",
+  x64:  "#{base_url}/supercet-x64"
+}
+
+puts "→ Fetching ARM binary…"
+arm_data = URI.open(urls[:arm]) { |f| f.read }
+puts "→ Fetching x64 binary…"
+x64_data = URI.open(urls[:x64]) { |f| f.read }
+
+arm_sha = Digest::SHA256.hexdigest(arm_data)
+x64_sha = Digest::SHA256.hexdigest(x64_data)
+
+puts "→ ARM SHA256: #{arm_sha}"
+puts "→ x64 SHA256: #{x64_sha}"
+
+unless File.exist?(FORMULA)
+  abort "Error: #{FORMULA} not found."
+end
+
+
+formula = File.read(FORMULA)
+
+# 1) Update both arm64 and x64 URLs
+formula.gsub!(
+  %r{url\s+"https://github\.com/supercet/homebrew-supercet/releases/download/v[^/]+/supercet-arm64"},
+  "url \"#{urls[:arm]}\""
+)
+formula.gsub!(
+  %r{url\s+"https://github\.com/supercet/homebrew-supercet/releases/download/v[^/]+/supercet-x64"},
+  "url \"#{urls[:x64]}\""
+)
+
+# 2) Replace the three sha256 lines: first two → ARM, third → x64
+count = 0
+formula.gsub!(/sha256\s+"[a-f0-9]+"/) do
+  count += 1
+  if count <= 2
+    "sha256 \"#{arm_sha}\""
   else
-    puts "Error: Failed to download or calculate SHA256 for #{url}"
-    puts "Command failed with exit code: #{$?.exitstatus}"
-    puts "Make sure the release v#{version} exists on GitHub with the binary files"
-    puts "Try visiting the URL manually to verify it exists: #{url}"
-    exit 1
+    "sha256 \"#{x64_sha}\""
   end
 end
 
-# Get the latest version from package.json
-package_json = JSON.parse(File.read('package.json'))
-version = package_json['version']
-
-puts "Updating formula for version #{version}"
-
-# URLs for the pre-compiled binaries
-arm64_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-arm64"
-x64_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-x64"
-
-puts "Calculating SHA256 for ARM64 binary..."
-arm64_sha256 = calculate_sha256(arm64_url, version)
-
-puts "Calculating SHA256 for x64 binary..."
-x64_sha256 = calculate_sha256(x64_url, version)
-
-# Update the formula
-formula_path = 'Formula/supercet.rb'
-formula_content = File.read(formula_path)
-
-# Update version and SHA256 values
-updated_content = formula_content.gsub(
-  /url "https:\/\/github\.com\/supercet\/homebrew-supercet\/releases\/download\/v[^"]+"/,
-  "url \"https://github.com/supercet/homebrew-supercet/releases/download/v#{version}/supercet-arm64\""
-).gsub(
-  /sha256 "PLACEHOLDER_SHA256_ARM64"/,
-  "sha256 \"#{arm64_sha256}\""
-).gsub(
-  /sha256 "PLACEHOLDER_SHA256_X64"/,
-  "sha256 \"#{x64_sha256}\""
-)
-
-File.write(formula_path, updated_content)
-puts "Updated #{formula_path} with version #{version}"
-puts "ARM64 SHA256: #{arm64_sha256}"
-puts "x64 SHA256: #{x64_sha256}"
+# Write it back
+File.write(FORMULA, formula)
+puts "✅ Updated #{FORMULA} to v#{version} with new checksums."
