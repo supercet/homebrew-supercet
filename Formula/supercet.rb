@@ -1,19 +1,19 @@
 class Supercet < Formula
   desc "Supercet - A Node.js application for git operations"
   homepage "https://github.com/supercet/homebrew-supercet"
-  version "0.1.13"
-  url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.13/supercet-arm64"
-  sha256 "51a2740c1f15110af4c5b8f1ef4db4c5c5986379f1209918f9bbb01777c850b6"
+  version "0.1.14"
+  url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.14/supercet-arm64"
+  sha256 "b44afcdac607fd5d9babae9d62e6246dc2c412c8871a2cc02f0508d3305e7372"
   license "MIT"
 
   on_arm do
-    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.13/supercet-arm64"
-    sha256 "51a2740c1f15110af4c5b8f1ef4db4c5c5986379f1209918f9bbb01777c850b6"
+    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.14/supercet-arm64"
+    sha256 "b44afcdac607fd5d9babae9d62e6246dc2c412c8871a2cc02f0508d3305e7372"
   end
 
   on_intel do
-    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.13/supercet-x64"
-    sha256 "6154316495c7b1682aacb57d578e473fd3faa9420dcfab2d37daed4fee2174bd"
+    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.1.14/supercet-x64"
+    sha256 "c5f6ec5c0a190e77fadf04a7ee1d60e7ed4e581489f6da35c3d7d215960373f5"
   end
 
   def install
