@@ -1,6 +1,8 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { ContentfulStatusCode } from "hono/utils/http-status";
+import { createServer } from "net";
 
 // Import git route handlers
 import { getBranches } from "./git/branches";
@@ -15,14 +17,26 @@ import { postStage } from "./git/stage";
 import { getStatus } from "./git/status";
 import { postUnstage } from "./git/unstage";
 
+// Check if port is available
+function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.listen(port, () => {
+      server.close();
+      resolve(true);
+    });
+    server.on("error", () => {
+      resolve(false);
+    });
+  });
+}
+
 // Version check function
 async function checkForUpdates(): Promise<void> {
   const currentVersion = process.env.SUPERCET_VERSION;
 
   if (!currentVersion) {
-    console.warn(
-      "SUPERCET_VERSION environment variable not set, skipping version check"
-    );
+    console.warn("SUPERCET_VERSION environment variable not set");
     return;
   }
 
@@ -119,7 +133,7 @@ app.use("*", async (c, next) => {
       await next();
     } else {
       // Token validation failed
-      return response;
+      return c.json(response, response.status as ContentfulStatusCode);
     }
   } catch (error) {
     // Network error or other issues
@@ -141,17 +155,35 @@ app.get("/api/git/remote", getRemote);
 app.get("/api/git/remotes", getRemotes);
 
 // Start server
-serve(
-  {
-    fetch: app.fetch,
-    port: 4444,
-  },
-  async (info) => {
-    // Check for updates before displaying server info
-
-    console.log(
-      `Supercet version ${process.env.SUPERCET_VERSION} is running on http://localhost:${info.port}`
-    );
-    await checkForUpdates();
+async function startServer() {
+  // Check if port is already in use
+  const portAvailable = await isPortAvailable(4444);
+  if (!portAvailable) {
+    throw new Error("Supercet is already running on port 4444");
   }
-);
+
+  serve(
+    {
+      fetch: app.fetch,
+      port: 4444,
+    },
+    async (info) => {
+      // Check for updates before displaying server info
+
+      console.log(
+        `\nSupercet version ${process.env.SUPERCET_VERSION} is running on http://localhost:${info.port}`
+      );
+      await checkForUpdates();
+
+      console.log(
+        "\n Review your local code changes at https://supercet.com/conduit"
+      );
+    }
+  );
+}
+
+// Start the server
+startServer().catch((error) => {
+  console.error("❌ Failed to start server:", error.message);
+  process.exit(1);
+});
