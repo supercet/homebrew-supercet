@@ -91,6 +91,11 @@ app.post("/api/git/unstage", postUnstage);
 app.get("/api/git/remote", getRemote);
 app.get("/api/git/remotes", getRemotes);
 
+// Heartbeat route
+app.get("/api/heartbeat", (c) => {
+  return c.json(null, 200);
+});
+
 // Start server
 async function startServer() {
   // Check if port is already in use
