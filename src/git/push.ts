@@ -13,7 +13,6 @@ export async function postPush(c: Context) {
     const branch = data.branch;
 
     try {
-      console.log("pushing to ", remote, branch);
       await gitOperations.push(remote, branch);
 
       return c.json({}, 201);
