@@ -1,4 +1,4 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 type CheckoutReqBody = {
@@ -12,11 +12,7 @@ export async function postCheckout(c: Context) {
 
     if (data?.branch?.length) {
       try {
-        const args = [data.branch];
-        if (data.isNew) {
-          args.unshift("-b");
-        }
-        await git.checkout(args);
+        await gitOperations.checkout(data.branch, data.isNew);
 
         if (data.isNew) {
           return c.json({}, 201);

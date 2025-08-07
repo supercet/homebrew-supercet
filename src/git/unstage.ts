@@ -1,4 +1,4 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 type UnStageReqBody = {
@@ -11,7 +11,7 @@ export async function postUnstage(c: Context) {
 
     if (data?.files?.length) {
       try {
-        await git.reset(["--", ...data.files]);
+        await gitOperations.unstage(data.files);
 
         return c.json({}, 200);
       } catch (e) {

@@ -1,9 +1,9 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 export async function getRemotes(c: Context) {
   try {
-    const remotes = await git.remote(["show"]);
+    const remotes = await gitOperations.remotes();
 
     if (!remotes) {
       return c.json(null, 404);

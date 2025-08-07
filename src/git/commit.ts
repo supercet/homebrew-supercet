@@ -1,4 +1,4 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 type CommitReqBody = {
@@ -11,7 +11,7 @@ export async function postCommit(c: Context) {
 
     if (data?.message?.length) {
       try {
-        await git.commit(data.message);
+        await gitOperations.commit(data.message);
 
         return c.json({}, 201);
       } catch (e) {

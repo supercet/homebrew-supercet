@@ -1,4 +1,4 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 type PushReqBody = {
@@ -10,21 +10,11 @@ export async function postPush(c: Context) {
   try {
     const data: PushReqBody = await c.req.json();
     const remote = data.remote || "origin";
-    let branch = data.branch;
-
-    if (!branch) {
-      try {
-        const branchRes = await git.branch();
-        branch = branchRes.current;
-      } catch (e) {
-        console.error(`failed to get current branch : ${e}`);
-        return c.json({ error: "Failed to get current branch" }, 500);
-      }
-    }
+    const branch = data.branch;
 
     try {
       console.log("pushing to ", remote, branch);
-      await git.push(remote, branch);
+      await gitOperations.push(remote, branch);
 
       return c.json({}, 201);
     } catch (e) {

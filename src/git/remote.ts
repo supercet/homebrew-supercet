@@ -1,4 +1,4 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 interface GitHubRepo {
@@ -35,12 +35,12 @@ function parseGitHubUrl(url: string): GitHubRepo | null {
 export async function getRemote(c: Context) {
   const remote = c.req.query("remote") || "origin";
   try {
-    const remoteRes = await git.remote(["get-url", remote]);
-    if (!remoteRes) {
+    const remoteData = await gitOperations.remote(remote);
+    if (!remoteData) {
       return c.json(null, 404);
     }
 
-    const parsedRepo = parseGitHubUrl(remoteRes);
+    const parsedRepo = parseGitHubUrl(remoteData);
     if (parsedRepo) {
       return c.json(parsedRepo);
     } else {
