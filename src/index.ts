@@ -2,7 +2,10 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { ContentfulStatusCode } from "hono/utils/http-status";
-import { createServer } from "net";
+import { Server as SocketIOServer } from "socket.io";
+import type { Server as HTTPServer } from "node:http";
+import { handleSocketGitOperation, gitOperations } from "./utils/gitHelpers";
+import { isPortAvailable, checkForUpdates } from "./utils/routeHelpers";
 
 // Import git route handlers
 import { getBranches } from "./git/branches";
@@ -17,73 +20,7 @@ import { postStage } from "./git/stage";
 import { getStatus } from "./git/status";
 import { postUnstage } from "./git/unstage";
 
-// Check if port is available
-function isPortAvailable(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.listen(port, () => {
-      server.close();
-      resolve(true);
-    });
-    server.on("error", () => {
-      resolve(false);
-    });
-  });
-}
-
-// Version check function
-async function checkForUpdates(): Promise<void> {
-  const currentVersion = process.env.SUPERCET_VERSION;
-
-  if (!currentVersion) {
-    console.warn("SUPERCET_VERSION environment variable not set");
-    return;
-  }
-
-  try {
-    // Fetch the latest release from GitHub
-    const response = await fetch(
-      "https://api.github.com/repos/supercet/homebrew-supercet/releases/latest",
-      {
-        headers: {
-          Accept: "application/vnd.github.v3+json",
-        },
-      }
-    );
-
-    if (!response.ok) {
-      console.warn("Failed to fetch latest release information from GitHub");
-      return;
-    }
-
-    const releaseData = await response.json();
-    const latestVersion = releaseData.tag_name?.replace(/^v/, ""); // Remove 'v' prefix if present
-
-    if (!latestVersion) {
-      console.warn(
-        "Could not determine latest version from GitHub release data"
-      );
-      return;
-    }
-
-    console.log("\n");
-
-    // Compare versions (simple string comparison for semantic versions)
-    if (latestVersion !== currentVersion) {
-      console.log("\n" + "=".repeat(60));
-      console.log("🚀 A new version of Supercet is available!");
-      console.log(`Current version: ${currentVersion}`);
-      console.log(`Latest version:  ${latestVersion}`);
-      console.log("To upgrade, run:");
-      console.log("brew update && brew upgrade supercet");
-      console.log("=".repeat(60) + "\n");
-    } else {
-      console.log("✨ You are on the latest version of Supercet ✨");
-    }
-  } catch (error) {
-    console.warn("Error checking for updates:", error);
-  }
-}
+const PORT = 4444;
 
 const app = new Hono();
 
@@ -157,28 +94,182 @@ app.get("/api/git/remotes", getRemotes);
 // Start server
 async function startServer() {
   // Check if port is already in use
-  const portAvailable = await isPortAvailable(4444);
+  const portAvailable = await isPortAvailable(PORT);
   if (!portAvailable) {
-    throw new Error("Supercet is already running on port 4444");
+    throw new Error(`Supercet is already running on port ${PORT}`);
   }
 
-  serve(
-    {
-      fetch: app.fetch,
-      port: 4444,
+  // Create HTTP server using Hono's serve function
+  const httpServer = serve({
+    fetch: app.fetch,
+    port: PORT,
+  });
+
+  // Create Socket.IO server
+  const io = new SocketIOServer(httpServer as HTTPServer, {
+    cors: {
+      origin: ["https://supercet.com"],
+      methods: ["GET", "POST"],
+      credentials: true,
     },
-    async (info) => {
-      // Check for updates before displaying server info
+  });
 
-      console.log(
-        `\nSupercet version ${process.env.SUPERCET_VERSION} is running on http://localhost:${info.port}`
-      );
-      await checkForUpdates();
+  // Socket.IO event handlers
+  io.on("connection", (socket) => {
+    console.log(`🔌 WebSocket client connected: ${socket.id}`);
 
-      console.log(
-        "\n Review your local code changes at https://supercet.com/conduit"
+    // Handle client authentication
+    socket.on("authenticate", (token: string) => {
+      // Validate token (you can reuse the same validation logic)
+      fetch("https://supercet.com/api/conduit/token/validate", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      })
+        .then((response) => {
+          if (response.status === 200) {
+            socket.emit("authenticated", { success: true });
+            console.log(`✅ WebSocket client authenticated: ${socket.id}`);
+          } else {
+            socket.emit("authenticated", {
+              success: false,
+              error: "Invalid token",
+            });
+          }
+        })
+        .catch((error) => {
+          console.error("Authentication failed:", error);
+          socket.emit("authenticated", {
+            success: false,
+            error: "Authentication failed",
+          });
+        });
+    });
+
+    // Handle git status updates
+    socket.on("git:status", async () => {
+      const result = await handleSocketGitOperation(
+        gitOperations.status,
+        "get git status"
       );
-    }
+      socket.emit("git:status:update", result);
+    });
+
+    // Handle git branches
+    socket.on("git:branches", async () => {
+      const result = await handleSocketGitOperation(
+        gitOperations.branches,
+        "get git branches"
+      );
+      socket.emit("git:branches:update", result);
+    });
+
+    // Handle git commits
+    socket.on(
+      "git:commits",
+      async (params: { branch?: string; from?: string; to?: string }) => {
+        const result = await handleSocketGitOperation(
+          () => gitOperations.commits(params.branch, params.from, params.to),
+          "get git commits"
+        );
+        socket.emit("git:commits:update", result);
+      }
+    );
+
+    // Handle git diff
+    socket.on("git:diff", async (params: { from?: string; to?: string }) => {
+      const result = await handleSocketGitOperation(
+        () => gitOperations.diff(params.from, params.to),
+        "get git diff"
+      );
+      socket.emit("git:diff:update", result);
+    });
+
+    // Handle git remotes
+    socket.on("git:remotes", async () => {
+      const result = await handleSocketGitOperation(
+        gitOperations.remotes,
+        "get git remotes"
+      );
+      socket.emit("git:remotes:update", result);
+    });
+
+    // Handle git remote
+    socket.on("git:remote", async (params: { name: string }) => {
+      const result = await handleSocketGitOperation(
+        () => gitOperations.remote(params.name),
+        "get git remote"
+      );
+      socket.emit("git:remote:update", result);
+    });
+
+    // Handle git stage
+    socket.on("git:stage", async (params: { files: string[] }) => {
+      const result = await handleSocketGitOperation(
+        () => gitOperations.stage(params.files),
+        "stage git files"
+      );
+      socket.emit("git:stage:update", result);
+    });
+
+    // Handle git unstage
+    socket.on("git:unstage", async (params: { files: string[] }) => {
+      const result = await handleSocketGitOperation(
+        () => gitOperations.unstage(params.files),
+        "unstage git files"
+      );
+      socket.emit("git:unstage:update", result);
+    });
+
+    // Handle git commit
+    socket.on("git:commit", async (params: { message: string }) => {
+      const result = await handleSocketGitOperation(
+        () => gitOperations.commit(params.message),
+        "commit git changes"
+      );
+      socket.emit("git:commit:update", result);
+    });
+
+    // Handle git push
+    socket.on(
+      "git:push",
+      async (params: { remote?: string; branch?: string }) => {
+        const result = await handleSocketGitOperation(
+          () => gitOperations.push(params.remote, params.branch),
+          "push git changes"
+        );
+        socket.emit("git:push:update", result);
+      }
+    );
+
+    // Handle git checkout
+    socket.on(
+      "git:checkout",
+      async (params: { target: string; isFile?: boolean }) => {
+        const result = await handleSocketGitOperation(
+          () => gitOperations.checkout(params.target, params.isFile || false),
+          "checkout git branch"
+        );
+        socket.emit("git:checkout:update", result);
+      }
+    );
+
+    // Handle disconnect
+    socket.on("disconnect", () => {
+      console.log(`🔌 WebSocket client disconnected: ${socket.id}`);
+    });
+  });
+
+  console.log(
+    `Supercet version ${process.env.SUPERCET_VERSION} is running on http://localhost:${PORT}`
+  );
+
+  await checkForUpdates();
+  // Check for updates
+  console.log(
+    "\n⮕ Review your local code changes at https://supercet.com/conduit"
   );
 }
 

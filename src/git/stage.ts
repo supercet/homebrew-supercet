@@ -1,4 +1,4 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 type StageReqBody = {
@@ -12,10 +12,7 @@ export async function postStage(c: Context) {
 
     if (data?.files?.length) {
       try {
-        if (data.areFilesUntracked) {
-          data.files.unshift("-N");
-        }
-        await git.add(data.files);
+        await gitOperations.stage(data.files, data.areFilesUntracked);
 
         return c.json({}, 200);
       } catch (e) {

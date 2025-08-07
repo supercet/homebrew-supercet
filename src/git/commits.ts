@@ -1,4 +1,4 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 export async function getCommits(c: Context) {
@@ -6,16 +6,9 @@ export async function getCommits(c: Context) {
     const branch = c.req.query("branch");
     const from = c.req.query("from");
     const to = c.req.query("to");
-    const args = [branch, from, to].filter(
-      (item) => item !== undefined && item !== null
-    );
-    let data;
 
-    if (args.length) {
-      data = await git.log(args);
-    } else {
-      data = await git.log();
-    }
+    const data = await gitOperations.commits(branch, from, to);
+
     return c.json(data);
   } catch (e) {
     console.error("failed git commit", e);

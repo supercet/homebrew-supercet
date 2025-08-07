@@ -1,10 +1,10 @@
-import { git } from "../utils/gitWrapper";
+import { gitOperations } from "../utils/gitHelpers";
 import type { Context } from "hono";
 
 export async function getBranches(c: Context) {
   try {
-    // -l ignores remote branches
-    const branchRes = await git.branch(["-l"]);
+    const branchRes = await gitOperations.branches();
+
     return c.json(branchRes);
   } catch (e) {
     console.error(`failed to get branches : ${e}`);
