@@ -4,6 +4,8 @@ import { cors } from "hono/cors";
 import { ContentfulStatusCode } from "hono/utils/http-status";
 import { Server as SocketIOServer } from "socket.io";
 import type { Server as HTTPServer } from "node:http";
+import "dotenv/config";
+
 import { handleSocketGitOperation, gitOperations } from "./utils/gitHelpers";
 import { isPortAvailable, checkForUpdates } from "./utils/routeHelpers";
 
@@ -21,6 +23,7 @@ import { getStatus } from "./git/status";
 import { postUnstage } from "./git/unstage";
 
 const PORT = 4444;
+const HOST = process.env.SUPERCET_URL || "https://supercet.com";
 
 const app = new Hono();
 
@@ -28,7 +31,7 @@ const app = new Hono();
 app.use(
   "*",
   cors({
-    origin: ["https://supercet.com"],
+    origin: [HOST],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     credentials: true,
@@ -54,16 +57,13 @@ app.use("*", async (c, next) => {
 
   try {
     // Make request to Supercet API to validate token
-    const response = await fetch(
-      "https://supercet.com/api/conduit/token/validate",
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+    const response = await fetch(`${HOST}/api/conduit/token/validate`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
 
     if (response.status === 200) {
       // Token is valid, continue with the request
@@ -108,7 +108,7 @@ async function startServer() {
   // Create Socket.IO server
   const io = new SocketIOServer(httpServer as HTTPServer, {
     cors: {
-      origin: ["https://supercet.com"],
+      origin: [HOST],
       methods: ["GET", "POST"],
       credentials: true,
     },
@@ -121,7 +121,7 @@ async function startServer() {
     // Handle client authentication
     socket.on("authenticate", (token: string) => {
       // Validate token (you can reuse the same validation logic)
-      fetch("https://supercet.com/api/conduit/token/validate", {
+      fetch(`${HOST}/api/conduit/token/validate`, {
         method: "GET",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -268,9 +268,7 @@ async function startServer() {
 
   await checkForUpdates();
   // Check for updates
-  console.log(
-    "\n⮕ Review your local code changes at https://supercet.com/conduit"
-  );
+  console.log(`\n⮕ Review your local code changes at ${HOST}/conduit`);
 }
 
 // Start the server

@@ -1,10 +1,10 @@
 {
   "name": "homebrew-supercet",
   "type": "module",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --minify --platform=node --outfile=dist/supercet.js --define:process.env.SUPERCET_VERSION=$(node -p \"JSON.stringify(require('./package.json').version)\")",
+    "build": "esbuild src/index.ts --bundle --minify --platform=node --outfile=dist/supercet.js --define:process.env.SUPERCET_VERSION=$(node -p \"JSON.stringify(require('./package.json').version)\") --define:process.env.SUPERCET_URL=\\\"$(grep SUPERCET_URL .env | cut -d '=' -f2)\\\"",
     "start": "node dist/supercet.js",
     "bundle": "pkg dist/supercet.js --compress GZip --out-path dist/bundle --targets node22-macos-arm64,node22-macos-x64",
     "build-bundle": "npm run build && npm run bundle",
@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.18.1",
+    "dotenv": "^17.2.1",
     "hono": "^4.8.12",
     "jsonwebtoken": "^9.0.2",
     "simple-git": "^3.28.0",
