@@ -203,6 +203,14 @@ async function startServer() {
 
     // Handle git remote
     socket.on("git:remote", async (params: { name: string }) => {
+      if (!params?.name) {
+        socket.emit("git:remote:update", {
+          success: false,
+          error: "Remote name is required",
+        });
+        return;
+      }
+
       const result = await handleSocketGitOperation(
         () => gitOperations.remote(params.name),
         "get git remote"
@@ -212,6 +220,14 @@ async function startServer() {
 
     // Handle git stage
     socket.on("git:stage", async (params: { files: string[] }) => {
+      if (!params?.files?.length) {
+        socket.emit("git:stage:update", {
+          success: false,
+          error: "Files array is required",
+        });
+        return;
+      }
+
       const result = await handleSocketGitOperation(
         () => gitOperations.stage(params.files),
         "stage git files"
@@ -221,6 +237,14 @@ async function startServer() {
 
     // Handle git unstage
     socket.on("git:unstage", async (params: { files: string[] }) => {
+      if (!params?.files?.length) {
+        socket.emit("git:unstage:update", {
+          success: false,
+          error: "Files array is required",
+        });
+        return;
+      }
+
       const result = await handleSocketGitOperation(
         () => gitOperations.unstage(params.files),
         "unstage git files"
@@ -230,6 +254,14 @@ async function startServer() {
 
     // Handle git commit
     socket.on("git:commit", async (params: { message: string }) => {
+      if (!params?.message) {
+        socket.emit("git:commit:update", {
+          success: false,
+          error: "Commit message is required",
+        });
+        return;
+      }
+
       const result = await handleSocketGitOperation(
         () => gitOperations.commit(params.message),
         "commit git changes"
@@ -253,6 +285,14 @@ async function startServer() {
     socket.on(
       "git:checkout",
       async (params: { target: string; isFile?: boolean }) => {
+        if (!params?.target) {
+          socket.emit("git:checkout:update", {
+            success: false,
+            error: "Target is required",
+          });
+          return;
+        }
+
         const result = await handleSocketGitOperation(
           () => gitOperations.checkout(params.target, params.isFile || false),
           "checkout git branch"
