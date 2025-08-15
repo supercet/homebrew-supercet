@@ -4,6 +4,9 @@ import { cors } from "hono/cors";
 import { ContentfulStatusCode } from "hono/utils/http-status";
 import { Server as SocketIOServer } from "socket.io";
 import type { Server as HTTPServer } from "node:http";
+import pty from "node-pty";
+import os from "os";
+import fs from "fs";
 import "dotenv/config";
 
 import { handleSocketGitOperation, gitOperations } from "./utils/gitHelpers";
@@ -41,6 +44,68 @@ interface AuthenticatedSocket {
 const authenticatedSockets = new Map<string, AuthenticatedSocket>();
 
 const app = new Hono();
+
+function ensurePath(input?: string): string {
+  const fallback = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  const parts = new Set((input || "").split(":").filter(Boolean).concat(fallback));
+  return Array.from(parts).join(":");
+}
+
+function pickShell(): string {
+  const candidates = [process.env.SHELL, "/bin/zsh", "/bin/bash", "/bin/sh"].filter(Boolean) as string[];
+  return candidates.find(shell => shell.startsWith("/") && fs.existsSync(shell)) || "/bin/sh";
+}
+
+function pickCwd(): string {
+  const candidates = [process.cwd(), process.env.HOME, os.homedir?.(), "/tmp", "/"].filter(Boolean) as string[];
+  for (const dir of candidates) {
+    try {
+      if (fs.statSync(dir).isDirectory()) return dir;
+    } catch {}
+  }
+  return "/";
+}
+
+function buildEnv(): NodeJS.ProcessEnv {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([, v]) => typeof v === "string")
+  ) as Record<string, string>;
+  
+  return {
+    ...env,
+    PATH: ensurePath(env.PATH),
+    HOME: env.HOME || os.homedir?.() || "/",
+    SHELL: env.SHELL || "/bin/zsh",
+    TERM: env.TERM || "xterm-256color",
+    LANG: env.LANG || "en_US.UTF-8",
+    LC_ALL: env.LC_ALL || "en_US.UTF-8",
+  };
+}
+
+function shellArgsFor(file: string): string[] {
+  if (file.endsWith("/zsh")) return ["-i"]; // interactive
+  if (file.endsWith("/bash")) return ["--login"]; // login
+  if (file.endsWith("/sh")) return []; // minimal
+  return []; // safe default
+}
+
+export function spawnLoginShell(cols = 80, rows = 24) {
+  const file = pickShell();
+  const cwd = pickCwd();
+  const env = buildEnv();
+
+  // Verify shell is executable
+  fs.accessSync(file, fs.constants.X_OK);
+
+  const p = pty.spawn(file, shellArgsFor(file), {
+    name: "xterm-256color",
+    cols,
+    rows,
+    cwd,
+    env,
+  });
+  return p;
+}
 
 // CORS middleware - allow requests from specified origins
 app.use(
@@ -428,6 +493,27 @@ async function startServer() {
           "symbolic ref git remote"
         );
         socket.emit("git:symbolic-ref:update", result);
+      }
+    );
+
+    const cols = 80, rows = 24;
+
+    const ptyProcess = spawnLoginShell(cols, rows);
+    // Server -> Client: stream data
+    ptyProcess.onData((data) => {
+      socket.emit("terminal:data", data);
+    });
+
+    // Client -> Server: user input
+    socket.on("terminal:input", (data: string) => {
+      ptyProcess.write(data);
+    });
+
+    // Resize from client
+    socket.on(
+      "terminal:resize",
+      ({ cols, rows }: { cols: number; rows: number }) => {
+        if (cols && rows) ptyProcess.resize(cols, rows);
       }
     );
 
