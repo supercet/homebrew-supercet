@@ -93,47 +93,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node 22 (arm64 native)
+      - name: Setup Node 22 for target architecture
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          architecture: ${{ matrix.arch }}
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Install Rosetta (for x64 lane)
-        if: matrix.arch == 'x64'
-        run: sudo softwareupdate --install-rosetta --agree-to-license
-
-      - name: Install Node 22 x64 under Rosetta
-        if: matrix.arch == 'x64'
-        run: |
-          set -euo pipefail
-          NODE_VER=$(node -v | sed 's/^v//')
-          NODE_DIST="https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-darwin-x64.tar.xz"
-          mkdir -p "$RUNNER_TEMP/node-x64"
-          curl -fsSL "$NODE_DIST" | tar -xJ -C "$RUNNER_TEMP/node-x64" --strip-components=1
-          echo "$RUNNER_TEMP/node-x64/bin" >> $GITHUB_PATH
-          # Update PATH for this step
-          export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
-          arch -x86_64 "$RUNNER_TEMP/node-x64/bin/node" -p "process.version + ' ' + process.platform + ' ' + process.arch"
-
       - name: Install deps (postinstall -> patch-package)
-        run: |
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
-            arch -x86_64 npm i --os darwin --cpu x64
-          else
-            npm i --os darwin --cpu arm64
-          fi
+        run: npm i --os darwin --cpu ${{ matrix.arch }}
 
       - name: Rebuild node-pty for this arch
-        run: |
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
-            arch -x86_64 npm rebuild node-pty --build-from-source --arch=x64
-          else
-            npm rebuild node-pty --build-from-source --arch=arm64
-          fi
+        run: npm rebuild node-pty --build-from-source --arch=${{ matrix.arch }}
 
       - name: Verify node-pty native assets (portable find)
         shell: bash
@@ -150,18 +122,12 @@ jobs:
         run: |
           # Set a default SUPERCET_URL if not already set
           export SUPERCET_URL="${SUPERCET_URL:-https://default-url.example.com}"
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
-            arch -x86_64 npm run build
-          else
-            npm run build
-          fi
+          npm run build
 
       - name: Package single executable (pkg)
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
-            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
-            arch -x86_64 npm run bundle:x64
+            npm run bundle:x64
           else
             npm run bundle:arm64
           fi
