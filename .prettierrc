@@ -1,0 +1,15 @@
+{
+	"tabWidth": 4,
+	"singleQuote": true,
+	"bracketSpacing": true,
+	"useTabs": true,
+	"printWidth": 120,
+	"overrides": [
+		{
+			"files": "db/migrations/*",
+			"options": {
+				"singleQuote": false
+			}
+		}
+	]
+}
