@@ -79,18 +79,18 @@ jobs:
           echo "Please update the version in package.json before creating a pull request"
           exit 1
 
-  # --- PR test build (no release) ---
-  pr-build:
+  # --- Unified build job for both PR testing and release building ---
+  build:
     needs: check-version
-    if: github.event_name == 'pull_request' && needs.check-version.outputs.isVersionChanged == 'true'
     runs-on: macos-latest
+    if: needs.check-version.outputs.isVersionChanged == 'true'
     strategy:
       fail-fast: false
       matrix:
         arch: [arm64, x64]
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Node 22 (arm64 native)
@@ -166,39 +166,11 @@ jobs:
             npm run bundle:arm64
           fi
 
-  # --- Only used for release path on push ---
-  build:
-    needs: check-version
-    runs-on: macos-latest
-    if: needs.check-version.outputs.isVersionChanged == 'true'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build application
-        run: npm run build
-
-      - name: Create binaries
-        run: npm run bundle
-
-      - name: Upload binary artifacts
+      - name: Upload binary artifact (only on push)
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: supercet-arm64
-          path: dist/bundle/
-
-      - name: Upload x64 binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: supercet-x64
+          name: supercet-${{ matrix.arch }}
           path: dist/bundle/
 
   release:
@@ -206,7 +178,7 @@ jobs:
     permissions:
       contents: write
     runs-on: ubuntu-latest
-    if: needs.check-version.outputs.isVersionChanged == 'true'
+    if: github.event_name == 'push' && needs.check-version.outputs.isVersionChanged == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
