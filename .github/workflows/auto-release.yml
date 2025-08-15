@@ -10,6 +10,13 @@ on:
       - "patches/**"
       - "scripts/**"
       - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "src/**"
+      - "package.json"
+      - "patches/**"
+      - "scripts/**"
+      - ".github/workflows/**"
 
 # Cancel superseded PR builds on the same branch
 concurrency:
