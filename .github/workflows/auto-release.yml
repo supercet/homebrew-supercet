@@ -24,9 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # --- Only used for release path on push ---
+  # --- Check version for both push and pull_request events ---
   check-version:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       isVersionChanged: ${{ steps.version-changed.outputs.isVersionChanged }}
@@ -66,9 +65,24 @@ jobs:
             echo "isVersionChanged=false" >> $GITHUB_OUTPUT
             echo "Version has not changed (${{ steps.current-version.outputs.current-version }})"
           fi
+
+  # --- Fail PR builds when version hasn't changed ---
+  pr-version-check:
+    needs: check-version
+    if: github.event_name == 'pull_request' && needs.check-version.outputs.isVersionChanged == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail - Version not changed
+        run: |
+          echo "::error::Pull request requires a version change in package.json"
+          echo "Current version: $(node -p "require('./package.json').version")"
+          echo "Please update the version in package.json before creating a pull request"
+          exit 1
+
   # --- PR test build (no release) ---
   pr-build:
-    if: github.event_name == 'pull_request'
+    needs: check-version
+    if: github.event_name == 'pull_request' && needs.check-version.outputs.isVersionChanged == 'true'
     runs-on: macos-latest
     strategy:
       fail-fast: false
