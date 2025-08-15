@@ -4,51 +4,56 @@ on:
   push:
     branches: [main]
     paths: ["package.json"]
+  pull_request:
+    branches: [main]
+    # Build on changes that can affect the binary
+    paths:
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "patches/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+
+# Cancel superseded PR builds on the same branch
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # --- Only used for release path on push ---
   check-version:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       isVersionChanged: ${{ steps.version-changed.outputs.isVersionChanged }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      - name: Get current version from package.json
-        id: current-version
-        run: |
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "current-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          echo "Current version: $CURRENT_VERSION"
+      - id: current-version
+        run: echo "current-version=$(node -p \"require('./package.json').version\")" >> $GITHUB_OUTPUT
 
-      - name: Get previous version from git history
-        id: previous-version
+      - id: previous-version
         run: |
-          PREVIOUS_COMMIT=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
-          if [ -n "$PREVIOUS_COMMIT" ]; then
-            PREVIOUS_VERSION=$(git show $PREVIOUS_COMMIT:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          PREV=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
+          if [ -n "$PREV" ]; then
+            echo "previous-version=$(git show $PREV:package.json | node -p 'JSON.parse(require(\"fs\").readFileSync(0,\"utf8\")).version')" >> $GITHUB_OUTPUT
           else
-            PREVIOUS_VERSION="0.0.0"
+            echo "previous-version=0.0.0" >> $GITHUB_OUTPUT
           fi
-          echo "previous-version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
-          echo "Previous version: $PREVIOUS_VERSION"
 
-      - name: Check if version has changed
-        id: version-changed
+      - id: version-changed
         run: |
           if [ "${{ steps.current-version.outputs.current-version }}" != "${{ steps.previous-version.outputs.previous-version }}" ]; then
             echo "isVersionChanged=true" >> $GITHUB_OUTPUT
-            echo "Version changed from ${{ steps.previous-version.outputs.previous-version }} to ${{ steps.current-version.outputs.current-version }}"
           else
             echo "isVersionChanged=false" >> $GITHUB_OUTPUT
-            echo "Version has not changed (${{ steps.current-version.outputs.current-version }})"
           fi
 
-  build:
-    needs: check-version
-    if: needs.check-version.outputs.isVersionChanged == 'true'
+  # --- PR test build (no release) ---
+  pr-build:
+    if: github.event_name == 'pull_request'
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -56,20 +61,21 @@ jobs:
         arch: [arm64, x64]
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # Always install Node 22 (arm64). For x64 we'll also layer an x64 Node under Rosetta.
-      - name: Setup Node.js 22 (arm64 native)
+      - name: Setup Node 22 (arm64 native)
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Install Rosetta (for x64 build)
+      - name: Install Rosetta (for x64 lane)
         if: matrix.arch == 'x64'
         run: sudo softwareupdate --install-rosetta --agree-to-license
 
-      - name: Install Node 22 x64 under Rosetta and add to PATH
+      - name: Install Node 22 x64 under Rosetta
         if: matrix.arch == 'x64'
         run: |
           set -euo pipefail
@@ -78,11 +84,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/node-x64"
           curl -fsSL "$NODE_DIST" | tar -xJ -C "$RUNNER_TEMP/node-x64" --strip-components=1
           echo "$RUNNER_TEMP/node-x64/bin" >> $GITHUB_PATH
-          # Sanity: should print something like "v22.x.x darwin x64"
           arch -x86_64 node -p "process.version + ' ' + process.platform + ' ' + process.arch"
 
-      # ---- Install deps (postinstall runs patch-package) ----
-      - name: Clean install deps
+      - name: Install deps (postinstall -> patch-package)
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
             arch -x86_64 npm ci
@@ -90,8 +94,7 @@ jobs:
             npm ci
           fi
 
-      # ---- Rebuild node-pty for this arch ----
-      - name: Rebuild node-pty from source
+      - name: Rebuild node-pty for this arch
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
             arch -x86_64 npm rebuild node-pty --build-from-source
@@ -99,34 +102,26 @@ jobs:
             npm rebuild node-pty --build-from-source
           fi
 
-      # ---- Verify native artifacts exist (portable; no globstar) ----
-      - name: Verify node-pty native assets exist
+      - name: Verify node-pty native assets (portable find)
         shell: bash
         run: |
           set -euo pipefail
           found_pty=$(find node_modules -path "*/node-pty/build/Release/pty.node" -print -quit || true)
           found_helper=$(find node_modules -path "*/node-pty/build/Release/spawn-helper" -print -quit || true)
-
           if [[ -z "${found_pty}" ]]; then
-            echo "::error::pty.node not found after rebuild. Dumping node-pty build tree:"
-            find node_modules -path "*/node-pty/build/*" -maxdepth 2 -print || true
-            exit 1
-          fi
+            echo "::error::pty.node not found"; find node_modules -path "*/node-pty/build/*" -maxdepth 2 -print || true; exit 1; fi
+          echo "Found pty.node: ${found_pty}"
+          [[ -n "${found_helper}" ]] && echo "Found spawn-helper: ${found_helper}"
 
-          echo "Found pty.node at: ${found_pty}"
-          [[ -n "${found_helper}" ]] && echo "Found spawn-helper at: ${found_helper}"
-
-      # Optional: make sure it actually loads for this arch
       - name: Sanity load node-pty
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
-            arch -x86_64 node -e "require('node-pty'); console.log('node-pty OK for x64')"
+            arch -x86_64 node -e "require('node-pty'); console.log('node-pty OK (x64)')"
           else
-            node -e "require('node-pty'); console.log('node-pty OK for arm64')"
+            node -e "require('node-pty'); console.log('node-pty OK (arm64)')"
           fi
 
-      # ---- Build & Package ----
-      - name: Build (esbuild; externals keep *.node out)
+      - name: Build (esbuild)
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
             arch -x86_64 npm run build
@@ -134,7 +129,7 @@ jobs:
             npm run build
           fi
 
-      - name: Package single executable
+      - name: Package single executable (pkg)
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
             arch -x86_64 npm run bundle:x64
@@ -142,21 +137,100 @@ jobs:
             npm run bundle:arm64
           fi
 
-      # Some deps (e.g. 'open') may ship helper scripts not bundled by pkg; place them next to the binary if present.
-      - name: Place helper executables next to binary
-        run: |
-          mkdir -p dist/bundle
-          test -f node_modules/open/xdg-open && cp node_modules/open/xdg-open dist/bundle/xdg-open && chmod +x dist/bundle/xdg-open || true
+      - name: Upload PR artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-${{ matrix.arch }}
+          path: |
+            dist/bundle/supercet-arm64
+            dist/bundle/supercet-x64
+          if-no-files-found: ignore
+          retention-days: 7
 
-      # ---- Upload per-arch artifact (filenames match package.json outputs) ----
-      - name: Upload arm64 binary
+  # --- Release path on push to main with version bump ---
+  build:
+    needs: check-version
+    if: github.event_name == 'push' && needs.check-version.outputs.isVersionChanged == 'true'
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22 (arm64 native)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rosetta (for x64 lane)
+        if: matrix.arch == 'x64'
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Install Node 22 x64 under Rosetta
+        if: matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          NODE_VER=$(node -v | sed 's/^v//')
+          NODE_DIST="https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-darwin-x64.tar.xz"
+          mkdir -p "$RUNNER_TEMP/node-x64"
+          curl -fsSL "$NODE_DIST" | tar -xJ -C "$RUNNER_TEMP/node-x64" --strip-components=1
+          echo "$RUNNER_TEMP/node-x64/bin" >> $GITHUB_PATH
+          arch -x86_64 node -p "process.version + ' ' + process.platform + ' ' + process.arch"
+
+      - name: Install deps
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            arch -x86_64 npm ci
+          else
+            npm ci
+          fi
+
+      - name: Rebuild node-pty for this arch
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            arch -x86_64 npm rebuild node-pty --build-from-source
+          else
+            npm rebuild node-pty --build-from-source
+          fi
+
+      - name: Verify node-pty native assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          found_pty=$(find node_modules -path "*/node-pty/build/Release/pty.node" -print -quit || true)
+          if [[ -z "${found_pty}" ]]; then
+            echo "::error::pty.node not found after rebuild"; exit 1; fi
+          echo "Found pty.node: ${found_pty}"
+
+      - name: Build (esbuild)
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            arch -x86_64 npm run build
+          else
+            npm run build
+          fi
+
+      - name: Package (pkg)
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            arch -x86_64 npm run bundle:x64
+          else
+            npm run bundle:arm64
+          fi
+
+      - name: Upload arm64 artifact
         if: matrix.arch == 'arm64'
         uses: actions/upload-artifact@v4
         with:
           name: supercet-arm64
           path: dist/bundle/supercet-arm64
 
-      - name: Upload x64 binary
+      - name: Upload x64 artifact
         if: matrix.arch == 'x64'
         uses: actions/upload-artifact@v4
         with:
@@ -165,13 +239,12 @@ jobs:
 
   release:
     needs: [check-version, build]
-    if: needs.check-version.outputs.isVersionChanged == 'true'
+    if: github.event_name == 'push' && needs.check-version.outputs.isVersionChanged == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Download arm64 artifact
         uses: actions/download-artifact@v4
@@ -187,10 +260,7 @@ jobs:
 
       - name: Get version for tag
         id: version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Creating release for version: $VERSION"
+        run: echo "version=$(node -p \"require('./package.json').version\")" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
