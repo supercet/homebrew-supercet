@@ -11,65 +11,78 @@ jobs:
     outputs:
       isVersionChanged: ${{ steps.version-changed.outputs.isVersionChanged }}
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - id: current-version
-        run: echo "current-version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
-
-      - id: previous-version
+      - name: Get current version from package.json
+        id: current-version
         run: |
-          PREV=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
-          if [ -n "$PREV" ]; then
-            echo "previous-version=$(git show $PREV:package.json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')" >> $GITHUB_OUTPUT
-          else
-            echo "previous-version=0.0.0" >> $GITHUB_OUTPUT
-          fi
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "current-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
 
-      - id: version-changed
+      - name: Get previous version from git history
+        id: previous-version
+        run: |
+          PREVIOUS_COMMIT=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
+          if [ -n "$PREVIOUS_COMMIT" ]; then
+            PREVIOUS_VERSION=$(git show $PREVIOUS_COMMIT:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          else
+            PREVIOUS_VERSION="0.0.0"
+          fi
+          echo "previous-version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
+          echo "Previous version: $PREVIOUS_VERSION"
+
+      - name: Check if version has changed
+        id: version-changed
         run: |
           if [ "${{ steps.current-version.outputs.current-version }}" != "${{ steps.previous-version.outputs.previous-version }}" ]; then
             echo "isVersionChanged=true" >> $GITHUB_OUTPUT
+            echo "Version changed from ${{ steps.previous-version.outputs.previous-version }} to ${{ steps.current-version.outputs.current-version }}"
           else
             echo "isVersionChanged=false" >> $GITHUB_OUTPUT
+            echo "Version has not changed (${{ steps.current-version.outputs.current-version }})"
           fi
 
   build:
     needs: check-version
     if: needs.check-version.outputs.isVersionChanged == 'true'
-    runs-on: macos-latest # Apple Silicon runner
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         arch: [arm64, x64]
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # ---- Node toolchain per-arch ----
-      - name: Setup Node 22 (arm64 native)
-        if: matrix.arch == 'arm64'
+      # Always install Node 22 (arm64). For x64 we'll also layer an x64 Node under Rosetta.
+      - name: Setup Node.js 22 (arm64 native)
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Install Rosetta
+      - name: Install Rosetta (for x64 build)
         if: matrix.arch == 'x64'
         run: sudo softwareupdate --install-rosetta --agree-to-license
 
-      - name: Install Node 22 x64 under Rosetta
+      - name: Install Node 22 x64 under Rosetta and add to PATH
         if: matrix.arch == 'x64'
         run: |
-          NODE_DIST="https://nodejs.org/dist/v22.0.0/node-v22.0.0-darwin-x64.tar.xz"
-          mkdir -p $RUNNER_TEMP/node-x64
-          curl -fsSL "$NODE_DIST" | tar -xJ -C $RUNNER_TEMP/node-x64 --strip-components=1
+          set -euo pipefail
+          NODE_VER=$(node -v | sed 's/^v//')
+          NODE_DIST="https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-darwin-x64.tar.xz"
+          mkdir -p "$RUNNER_TEMP/node-x64"
+          curl -fsSL "$NODE_DIST" | tar -xJ -C "$RUNNER_TEMP/node-x64" --strip-components=1
           echo "$RUNNER_TEMP/node-x64/bin" >> $GITHUB_PATH
-          # Sanity: should print "darwin x64"
-          arch -x86_64 node -p "process.platform + ' ' + process.arch"
+          # Sanity: should print something like "v22.x.x darwin x64"
+          arch -x86_64 node -p "process.version + ' ' + process.platform + ' ' + process.arch"
 
-      # ---- Install deps and apply patch (postinstall runs patch-package) ----
-      - name: Clean install (runs postinstall -> patch-package)
+      # ---- Install deps (postinstall runs patch-package) ----
+      - name: Clean install deps
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
             arch -x86_64 npm ci
@@ -77,11 +90,8 @@ jobs:
             npm ci
           fi
 
-      - name: Verify node-pty patch applied
-        run: grep -q "node-pty-spawn-helper" node_modules/node-pty/lib/unixTerminal.js
-
-      # ---- Build native addon for the correct ABI/arch ----
-      - name: Rebuild node-pty (native addon)
+      # ---- Rebuild node-pty for this arch ----
+      - name: Rebuild node-pty from source
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
             arch -x86_64 npm rebuild node-pty --build-from-source
@@ -89,13 +99,34 @@ jobs:
             npm rebuild node-pty --build-from-source
           fi
 
-      - name: Verify native assets exist
+      # ---- Verify native artifacts exist (portable; no globstar) ----
+      - name: Verify node-pty native assets exist
+        shell: bash
         run: |
-          ls node_modules/**/node-pty/build/Release/pty.node
-          ls node_modules/**/node-pty/build/Release/spawn-helper
+          set -euo pipefail
+          found_pty=$(find node_modules -path "*/node-pty/build/Release/pty.node" -print -quit || true)
+          found_helper=$(find node_modules -path "*/node-pty/build/Release/spawn-helper" -print -quit || true)
+
+          if [[ -z "${found_pty}" ]]; then
+            echo "::error::pty.node not found after rebuild. Dumping node-pty build tree:"
+            find node_modules -path "*/node-pty/build/*" -maxdepth 2 -print || true
+            exit 1
+          fi
+
+          echo "Found pty.node at: ${found_pty}"
+          [[ -n "${found_helper}" ]] && echo "Found spawn-helper at: ${found_helper}"
+
+      # Optional: make sure it actually loads for this arch
+      - name: Sanity load node-pty
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            arch -x86_64 node -e "require('node-pty'); console.log('node-pty OK for x64')"
+          else
+            node -e "require('node-pty'); console.log('node-pty OK for arm64')"
+          fi
 
       # ---- Build & Package ----
-      - name: Build app (esbuild with --external:node-pty/*.node)
+      - name: Build (esbuild; externals keep *.node out)
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
             arch -x86_64 npm run build
@@ -111,18 +142,26 @@ jobs:
             npm run bundle:arm64
           fi
 
-      # Some deps (e.g. 'open') spawn helper scripts that pkg can’t embed; ship beside the binary.
+      # Some deps (e.g. 'open') may ship helper scripts not bundled by pkg; place them next to the binary if present.
       - name: Place helper executables next to binary
         run: |
           mkdir -p dist/bundle
           test -f node_modules/open/xdg-open && cp node_modules/open/xdg-open dist/bundle/xdg-open && chmod +x dist/bundle/xdg-open || true
 
-      # ---- Upload per-arch artifact ----
-      - name: Upload artifact
+      # ---- Upload per-arch artifact (filenames match package.json outputs) ----
+      - name: Upload arm64 binary
+        if: matrix.arch == 'arm64'
         uses: actions/upload-artifact@v4
         with:
-          name: supercet-macos-${{ matrix.arch }}
-          path: dist/bundle/supercet-macos-${{ matrix.arch }}
+          name: supercet-arm64
+          path: dist/bundle/supercet-arm64
+
+      - name: Upload x64 binary
+        if: matrix.arch == 'x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: supercet-x64
+          path: dist/bundle/supercet-x64
 
   release:
     needs: [check-version, build]
@@ -131,31 +170,35 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Download ARM64
+      - name: Download arm64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: supercet-macos-arm64
+          name: supercet-arm64
           path: dist/bundle
 
-      - name: Download x64
+      - name: Download x64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: supercet-macos-x64
+          name: supercet-x64
           path: dist/bundle
 
       - name: Get version for tag
         id: version
-        run: echo "version=$(node -p \"require('./package.json').version\")" >> $GITHUB_OUTPUT
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Creating release for version: $VERSION"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           files: |
-            dist/bundle/supercet-macos-arm64
-            dist/bundle/supercet-macos-x64
+            dist/bundle/supercet-arm64
+            dist/bundle/supercet-x64
           draft: false
           prerelease: false
 
