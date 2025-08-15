@@ -99,12 +99,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/node-x64"
           curl -fsSL "$NODE_DIST" | tar -xJ -C "$RUNNER_TEMP/node-x64" --strip-components=1
           echo "$RUNNER_TEMP/node-x64/bin" >> $GITHUB_PATH
-          arch -x86_64 node -p "process.version + ' ' + process.platform + ' ' + process.arch"
+          # Update PATH for this step
+          export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
+          arch -x86_64 "$RUNNER_TEMP/node-x64/bin/node" -p "process.version + ' ' + process.platform + ' ' + process.arch"
 
       - name: Install deps (postinstall -> patch-package)
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
-            npm i --os darwin --cpu x64
+            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
+            arch -x86_64 npm i --os darwin --cpu x64
           else
             npm i --os darwin --cpu arm64
           fi
@@ -112,7 +115,8 @@ jobs:
       - name: Rebuild node-pty for this arch
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
-            npm rebuild node-pty --build-from-source --arch=x64
+            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
+            arch -x86_64 npm rebuild node-pty --build-from-source --arch=x64
           else
             npm rebuild node-pty --build-from-source --arch=arm64
           fi
@@ -129,12 +133,21 @@ jobs:
           [[ -n "${found_helper}" ]] && echo "Found spawn-helper: ${found_helper}"
 
       - name: Build (esbuild)
-        run: npm run build
+        run: |
+          # Set a default SUPERCET_URL if not already set
+          export SUPERCET_URL="${SUPERCET_URL:-https://default-url.example.com}"
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
+            arch -x86_64 npm run build
+          else
+            npm run build
+          fi
 
       - name: Package single executable (pkg)
         run: |
           if [ "${{ matrix.arch }}" = "x64" ]; then
-            npm run bundle:x64
+            export PATH="$RUNNER_TEMP/node-x64/bin:$PATH"
+            arch -x86_64 npm run bundle:x64
           else
             npm run bundle:arm64
           fi
