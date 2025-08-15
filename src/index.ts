@@ -21,9 +21,24 @@ import { getRemotes } from "./git/remotes";
 import { postStage } from "./git/stage";
 import { getStatus } from "./git/status";
 import { postUnstage } from "./git/unstage";
+import { getRevParse } from "./git/revParse";
+import { getSymbolicRef } from "./git/symbolicRef";
 
 const PORT = 4444;
 const HOST = process.env.SUPERCET_URL || "https://supercet.com";
+
+/**
+ * Interface for tracking authenticated socket connections with token expiration management.
+ * This allows the server to automatically notify clients when their tokens are about to expire.
+ */
+interface AuthenticatedSocket {
+  socketId: string;
+  tokenExpiration: number;
+  refreshTimeout: NodeJS.Timeout;
+}
+
+// Map to store authenticated socket information
+const authenticatedSockets = new Map<string, AuthenticatedSocket>();
 
 const app = new Hono();
 
@@ -90,6 +105,8 @@ app.get("/api/git/status", getStatus);
 app.post("/api/git/unstage", postUnstage);
 app.get("/api/git/remote", getRemote);
 app.get("/api/git/remotes", getRemotes);
+app.get("/api/git/rev-parse", getRevParse);
+app.get("/api/git/symbolic-ref", getSymbolicRef);
 
 // Heartbeat route
 app.get("/api/heartbeat", (c) => {
@@ -119,12 +136,56 @@ async function startServer() {
     },
   });
 
+  /**
+   * Schedules a token refresh notification to be sent 3 seconds before the token expires.
+   * @param socketId - The ID of the socket to send the refresh notification to
+   * @param expirationTime - The timestamp when the token expires
+   * @returns A timeout handle that can be used to cancel the scheduled refresh
+   */
+  function scheduleTokenRefresh(socketId: string, expirationTime: number) {
+    const now = Date.now();
+    const timeUntilRefresh = expirationTime - now - 3000;
+
+    const sendTokenRefresh = () => {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        socket.emit("token:refresh");
+
+        // Set a 5-second expectation for re-authentication
+        const authExpectationTimeout = setTimeout(() => {
+          socket.disconnect(true);
+        }, 5000);
+
+        // Store the expectation timeout so it can be cleared if re-authentication occurs
+        socket.data.authExpectationTimeout = authExpectationTimeout;
+      }
+      // Remove from authenticated sockets (safe to call even if key doesn't exist)
+      authenticatedSockets.delete(socketId);
+    };
+
+    if (timeUntilRefresh <= 0) {
+      // Token expires in less than 3 seconds, send refresh immediately
+      sendTokenRefresh();
+      return;
+    }
+
+    const timeout = setTimeout(() => sendTokenRefresh(), timeUntilRefresh);
+
+    return timeout;
+  }
+
   // Socket.IO event handlers
   io.on("connection", (socket) => {
     console.log(`🔌 WebSocket client connected: ${socket.id}`);
 
     // Handle client authentication
     socket.on("authenticate", (token: string) => {
+      // Clear any existing auth expectation timeout
+      if (socket.data.authExpectationTimeout) {
+        clearTimeout(socket.data.authExpectationTimeout);
+        socket.data.authExpectationTimeout = null;
+      }
+
       // Validate token (you can reuse the same validation logic)
       fetch(`${HOST}/api/conduit/token/validate`, {
         method: "GET",
@@ -133,15 +194,50 @@ async function startServer() {
           "Content-Type": "application/json",
         },
       })
-        .then((response) => {
+        .then(async (response) => {
           if (response.status === 200) {
+            // Parse the response to get token expiration
+            const responseData = await response.json();
+            let expirationTime: number = Date.now() + 60 * 1000; // Default to 1 minute
+
+            // Try to extract expiration from various possible response formats
+            if (responseData.expiresAt) {
+              // Handle Unix timestamp in seconds (multiply by 1000) or ISO string
+              const expiresAt = responseData.expiresAt;
+              if (typeof expiresAt === "number") {
+                // Unix timestamp in seconds - convert to milliseconds
+                expirationTime = expiresAt * 1000;
+              }
+            }
+
+            // Clear any existing timeout for this socket
+            const existingAuth = authenticatedSockets.get(socket.id);
+            if (existingAuth?.refreshTimeout) {
+              clearTimeout(existingAuth.refreshTimeout);
+            }
+
+            // Schedule token refresh
+            const refreshTimeout = scheduleTokenRefresh(
+              socket.id,
+              expirationTime
+            );
+
+            // Store authenticated socket information
+            authenticatedSockets.set(socket.id, {
+              socketId: socket.id,
+              tokenExpiration: expirationTime,
+              refreshTimeout: refreshTimeout!,
+            });
+
             socket.emit("authenticated", { success: true });
-            console.log(`✅ WebSocket client authenticated: ${socket.id}`);
           } else {
             socket.emit("authenticated", {
               success: false,
               error: "Invalid token",
             });
+            console.log(
+              `❌ WebSocket client authentication failed: invalid token`
+            );
           }
         })
         .catch((error) => {
@@ -202,8 +298,8 @@ async function startServer() {
     });
 
     // Handle git remote
-    socket.on("git:remote", async (params: { name: string }) => {
-      if (!params?.name) {
+    socket.on("git:remote", async (params: { remote: string }) => {
+      if (!params?.remote) {
         socket.emit("git:remote:update", {
           success: false,
           error: "Remote name is required",
@@ -212,28 +308,31 @@ async function startServer() {
       }
 
       const result = await handleSocketGitOperation(
-        () => gitOperations.remote(params.name),
+        () => gitOperations.remote(params.remote),
         "get git remote"
       );
       socket.emit("git:remote:update", result);
     });
 
     // Handle git stage
-    socket.on("git:stage", async (params: { files: string[] }) => {
-      if (!params?.files?.length) {
-        socket.emit("git:stage:update", {
-          success: false,
-          error: "Files array is required",
-        });
-        return;
-      }
+    socket.on(
+      "git:stage",
+      async (params: { files: string[]; areFilesUntracked: boolean }) => {
+        if (!params?.files?.length) {
+          socket.emit("git:stage:update", {
+            success: false,
+            error: "Files array is required",
+          });
+          return;
+        }
 
-      const result = await handleSocketGitOperation(
-        () => gitOperations.stage(params.files),
-        "stage git files"
-      );
-      socket.emit("git:stage:update", result);
-    });
+        const result = await handleSocketGitOperation(
+          () => gitOperations.stage(params.files, params.areFilesUntracked),
+          "stage git files"
+        );
+        socket.emit("git:stage:update", result);
+      }
+    );
 
     // Handle git unstage
     socket.on("git:unstage", async (params: { files: string[] }) => {
@@ -272,7 +371,14 @@ async function startServer() {
     // Handle git push
     socket.on(
       "git:push",
-      async (params: { remote?: string; branch?: string }) => {
+      async (params: { remote: string; branch: string }) => {
+        if (!params?.remote || !params?.branch) {
+          socket.emit("git:push:update", {
+            success: false,
+            error: "Remote and branch are required",
+          });
+          return;
+        }
         const result = await handleSocketGitOperation(
           () => gitOperations.push(params.remote, params.branch),
           "push git changes"
@@ -301,9 +407,46 @@ async function startServer() {
       }
     );
 
+    // Handle git revParse
+    socket.on(
+      "git:rev-parse",
+      async (params: { ref: string; remote?: string }) => {
+        const result = await handleSocketGitOperation(
+          () => gitOperations.revParse(params.ref, params.remote),
+          "rev parse git ref"
+        );
+        socket.emit("git:rev-parse:update", result);
+      }
+    );
+
+    // Handle git symbolicRef
+    socket.on(
+      "git:symbolic-ref",
+      async (params: { remote: string; ref?: string }) => {
+        const result = await handleSocketGitOperation(
+          () => gitOperations.symbolicRef(params.remote, params.ref),
+          "symbolic ref git remote"
+        );
+        socket.emit("git:symbolic-ref:update", result);
+      }
+    );
+
     // Handle disconnect
     socket.on("disconnect", () => {
-      console.log(`🔌 WebSocket client disconnected: ${socket.id}`);
+      console.log(`WebSocket client disconnected: ${socket.id}`);
+
+      // Clean up authenticated socket tracking
+      const existingAuth = authenticatedSockets.get(socket.id);
+      if (existingAuth?.refreshTimeout) {
+        clearTimeout(existingAuth.refreshTimeout);
+      }
+      authenticatedSockets.delete(socket.id);
+
+      // Clean up auth expectation timeout
+      if (socket.data.authExpectationTimeout) {
+        clearTimeout(socket.data.authExpectationTimeout);
+        socket.data.authExpectationTimeout = null;
+      }
     });
   });
 
