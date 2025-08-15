@@ -68,20 +68,29 @@ jobs:
       - name: Build application
         run: npm run build
 
-      - name: Create binaries
-        run: npm run bundle
+      - name: Rebuild node-pty for ARM64
+        run: npm rebuild --target_arch=arm64
 
-      - name: Upload binary artifacts
+      - name: Create ARM64 binary
+        run: npm run bundle:arm64
+
+      - name: Rebuild node-pty for x64
+        run: npm rebuild --target_arch=x64
+
+      - name: Create x64 binary
+        run: npm run bundle:x64
+
+      - name: Upload ARM64 binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: supercet-arm64
-          path: dist/bundle/
+          path: dist/bundle/supercet-arm64
 
       - name: Upload x64 binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: supercet-x64
-          path: dist/bundle/
+          path: dist/bundle/supercet-x64
 
   release:
     needs: [check-version, build]
@@ -93,7 +102,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download artifacts
+      - name: Download ARM64 artifact
         uses: actions/download-artifact@v4
         with:
           name: supercet-arm64
