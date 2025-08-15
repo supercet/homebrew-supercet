@@ -65,12 +65,24 @@ export const gitOperations = {
   remote: async (remoteName: string) => {
     return await git.remote(["get-url", remoteName]);
   },
+  revParse: async (ref: string, remote?: string) => {
+    const args = remote ? [`${remote}/${ref}`] : [ref];
+    return await git.revparse(args);
+  },
 
   stage: async (files: string[], areFilesUntracked: boolean = false) => {
     if (areFilesUntracked) {
       files.unshift("-N");
     }
     return await git.add(files);
+  },
+
+  symbolicRef: async (remote: string, ref: string = "HEAD") => {
+    return await git.raw([
+      "symbolic-ref",
+      "--short",
+      `refs/remotes/${remote}/${ref}`,
+    ]);
   },
 
   unstage: async (files: string[]) => await git.reset(["--", ...files]),
