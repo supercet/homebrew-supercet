@@ -1,33 +1,33 @@
 diff --git a/node_modules/node-pty/build/Makefile b/node_modules/node-pty/build/Makefile
-index 9217bcb..e5b4089 100644
+index 443a8dc..43684b7 100644
 --- a/node_modules/node-pty/build/Makefile
 +++ b/node_modules/node-pty/build/Makefile
 @@ -336,8 +336,8 @@ ifeq ($(strip $(foreach prefix,$(NO_LOAD),\
  endif
  
  quiet_cmd_regen_makefile = ACTION Regenerating $@
--cmd_regen_makefile = cd $(srcdir); /Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/gyp/gyp_main.py -fmake --ignore-environment "-Dlibrary=shared_library" "-Dvisibility=default" "-Dnode_root_dir=/Users/shanansussman/Library/Caches/node-gyp/22.8.0" "-Dnode_gyp_dir=/Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp" "-Dnode_lib_file=/Users/shanansussman/Library/Caches/node-gyp/22.8.0/<(target_arch)/node.lib" "-Dmodule_root_dir=/private/var/folders/7d/m80jvpg95sj7xpws9c2t3xk40000gn/T/tmp-29249xhMo50nVTF1I/node_modules/node-pty" "-Dnode_engine=v8" "--depth=." "-Goutput_dir=." "--generator-output=build" -I/private/var/folders/7d/m80jvpg95sj7xpws9c2t3xk40000gn/T/tmp-29249xhMo50nVTF1I/node_modules/node-pty/build/config.gypi -I/Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi -I/Users/shanansussman/Library/Caches/node-gyp/22.8.0/include/node/common.gypi "--toplevel-dir=." binding.gyp
--Makefile: $(srcdir)/binding.gyp $(srcdir)/build/config.gypi $(srcdir)/../../../../../../../../../Users/shanansussman/Library/Caches/node-gyp/22.8.0/include/node/common.gypi $(srcdir)/../../../../../../../../../Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi
+-cmd_regen_makefile = cd $(srcdir); /Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/gyp/gyp_main.py -fmake --ignore-environment "-Dlibrary=shared_library" "-Dvisibility=default" "-Dnode_root_dir=/Users/shanansussman/Library/Caches/node-gyp/22.8.0" "-Dnode_gyp_dir=/Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp" "-Dnode_lib_file=/Users/shanansussman/Library/Caches/node-gyp/22.8.0/<(target_arch)/node.lib" "-Dmodule_root_dir=/private/var/folders/7d/m80jvpg95sj7xpws9c2t3xk40000gn/T/tmp-25628em5jMQUU1lca/node_modules/node-pty" "-Dnode_engine=v8" "--depth=." "-Goutput_dir=." "--generator-output=build" -I/private/var/folders/7d/m80jvpg95sj7xpws9c2t3xk40000gn/T/tmp-25628em5jMQUU1lca/node_modules/node-pty/build/config.gypi -I/Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi -I/Users/shanansussman/Library/Caches/node-gyp/22.8.0/include/node/common.gypi "--toplevel-dir=." binding.gyp
+-Makefile: $(srcdir)/../../../../../../../../../Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi $(srcdir)/build/config.gypi $(srcdir)/../../../../../../../../../Users/shanansussman/Library/Caches/node-gyp/22.8.0/include/node/common.gypi $(srcdir)/binding.gyp
 +cmd_regen_makefile = cd $(srcdir); /Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/gyp/gyp_main.py -fmake --ignore-environment "-Dlibrary=shared_library" "-Dvisibility=default" "-Dnode_root_dir=/Users/shanansussman/Library/Caches/node-gyp/22.8.0" "-Dnode_gyp_dir=/Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp" "-Dnode_lib_file=/Users/shanansussman/Library/Caches/node-gyp/22.8.0/<(target_arch)/node.lib" "-Dmodule_root_dir=/Users/shanansussman/Code/homebrew-supercet/node_modules/node-pty" "-Dnode_engine=v8" "--depth=." "-Goutput_dir=." "--generator-output=build" -I/Users/shanansussman/Code/homebrew-supercet/node_modules/node-pty/build/config.gypi -I/Users/shanansussman/.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi -I/Users/shanansussman/Library/Caches/node-gyp/22.8.0/include/node/common.gypi "--toplevel-dir=." binding.gyp
-+Makefile: $(srcdir)/binding.gyp $(srcdir)/build/config.gypi $(srcdir)/../../../../.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi $(srcdir)/../../../../Library/Caches/node-gyp/22.8.0/include/node/common.gypi
++Makefile: $(srcdir)/build/config.gypi $(srcdir)/../../../../.asdf/installs/nodejs/22.8.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi $(srcdir)/binding.gyp $(srcdir)/../../../../Library/Caches/node-gyp/22.8.0/include/node/common.gypi
  	$(call do_cmd,regen_makefile)
  
  # "all" is a concatenation of the "all" targets from all the included
 diff --git a/node_modules/node-pty/build/Release/pty.node b/node_modules/node-pty/build/Release/pty.node
-index 9134a13..1b95b1a 100755
+index 1a7efe0..f941901 100755
 Binary files a/node_modules/node-pty/build/Release/pty.node and b/node_modules/node-pty/build/Release/pty.node differ
 diff --git a/node_modules/node-pty/build/Release/spawn-helper b/node_modules/node-pty/build/Release/spawn-helper
-index bafc86c..a811ee0 100755
+index d8ddd15..27b8efa 100755
 Binary files a/node_modules/node-pty/build/Release/spawn-helper and b/node_modules/node-pty/build/Release/spawn-helper differ
 diff --git a/node_modules/node-pty/build/config.gypi b/node_modules/node-pty/build/config.gypi
-index 6512e4e..1d20c70 100644
+index 9e14fb0..1d20c70 100644
 --- a/node_modules/node-pty/build/config.gypi
 +++ b/node_modules/node-pty/build/config.gypi
 @@ -441,12 +441,11 @@
      "python": "/Users/shanansussman/.asdf/installs/python/3.12.11/bin/python3",
      "standalone_static_library": 1,
      "global_prefix": "/Users/shanansussman/.asdf/installs/nodejs/22.8.0",
--    "local_prefix": "/private/var/folders/7d/m80jvpg95sj7xpws9c2t3xk40000gn/T/tmp-29249xhMo50nVTF1I",
+-    "local_prefix": "/private/var/folders/7d/m80jvpg95sj7xpws9c2t3xk40000gn/T/tmp-25628em5jMQUU1lca",
 +    "local_prefix": "/Users/shanansussman/Code/homebrew-supercet",
      "globalconfig": "/Users/shanansussman/.asdf/installs/nodejs/22.8.0/etc/npmrc",
      "init_module": "/Users/shanansussman/.npm-init.js",
@@ -38,7 +38,7 @@ index 6512e4e..1d20c70 100644
      "cache": "/Users/shanansussman/.npm",
      "user_agent": "npm/10.8.2 node/v22.8.0 darwin arm64 workspaces/false",
 diff --git a/node_modules/node-pty/lib/unixTerminal.js b/node_modules/node-pty/lib/unixTerminal.js
-index c21d5f7..c90de24 100644
+index c21d5f7..204d311 100644
 --- a/node_modules/node-pty/lib/unixTerminal.js
 +++ b/node_modules/node-pty/lib/unixTerminal.js
 @@ -19,6 +19,7 @@ exports.UnixTerminal = void 0;
@@ -57,17 +57,17 @@ index c21d5f7..c90de24 100644
 +// to a real temp file and mark it executable.
 +if (process.pkg) {
 +    try {
-+    var os = require("os");
-+    var crypto = require("crypto");
-+    var tmp = path.join(
-+      os.tmpdir(),
-+      "node-pty-spawn-helper-" + process.platform + "-" + process.arch + "-" + crypto.randomBytes(6).toString("hex")
-+    );
-+    fs.copyFileSync(helperPath, tmp);
-+    fs.chmodSync(tmp, 0o755);
-+    helperPath = tmp;
++        var os = require("os");
++        var crypto = require("crypto");
++        var tmp = path.join(
++        os.tmpdir(),
++        "node-pty-spawn-helper-" + process.platform + "-" + process.arch + "-" + crypto.randomBytes(6).toString("hex")
++        );
++        fs.copyFileSync(helperPath, tmp);
++        fs.chmodSync(tmp, 0o755);
++        helperPath = tmp;
 +    } catch (e) {
-+    console.error("Failed to materialize spawn-helper:", e);
++        console.error("Failed to materialize spawn-helper:", e);
 +    }
 +}
  var DEFAULT_FILE = 'sh';
