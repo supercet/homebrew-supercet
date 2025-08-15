@@ -21,7 +21,7 @@ jobs:
         run: |
           PREV=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
           if [ -n "$PREV" ]; then
-            echo "previous-version=$(git show $PREV:package.json | node -p \"JSON.parse(require('fs').readFileSync(0,'utf8')).version\")" >> $GITHUB_OUTPUT
+            echo "previous-version=$(git show $PREV:package.json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')" >> $GITHUB_OUTPUT
           else
             echo "previous-version=0.0.0" >> $GITHUB_OUTPUT
           fi
