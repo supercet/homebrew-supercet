@@ -45,7 +45,6 @@ jobs:
             - name: Get previous version from git history
               id: previous-version
               run: |
-                  - name: Get previous version from git history
                   if [ "${{ github.event_name }}" = "pull_request" ]; then
                     # For pull requests, compare against the base branch (usually main)
                     BASE_BRANCH="${{ github.base_ref }}"
