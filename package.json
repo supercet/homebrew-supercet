@@ -1,46 +1,47 @@
 {
-  "name": "homebrew-supercet",
-  "type": "module",
-  "version": "0.3.6",
-  "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/supercet.js --external:node-pty --external:*.node --minify --define:process.env.SUPERCET_VERSION='\"'$(node -p 'require(\"./package.json\").version')'\"' --define:process.env.SUPERCET_URL='\"'${SUPERCET_URL:-https://supercet.com}'\"'",
-    "bundle:arm64": "pkg . --compress GZip --targets node22-macos-arm64 --output dist/bundle/supercet-arm64",
-    "bundle:x64": "pkg . --compress GZip --targets node22-macos-x64 --output dist/bundle/supercet-x64",
-    "start": "node dist/supercet.js",
-    "build-bundle": "npm run build && npm run bundle",
-    "tap:update": "ruby scripts/update-formula.rb",
-    "tap:test": "brew install --build-from-source ./Formula/supercet.rb",
-    "tap:uninstall": "brew uninstall supercet",
-    "postinstall": "patch-package"
-  },
-  "bin": {
-    "supercet": "dist/supercet.js"
-  },
-  "pkg": {
-    "assets": [
-      "node_modules/**/node-pty/build/Release/pty.node",
-      "node_modules/**/node-pty/build/Debug/pty.node",
-      "node_modules/**/node-pty/build/Release/spawn-helper",
-      "node_modules/**/node-pty/build/Debug/spawn-helper"
-    ],
-    "scripts": "dist/supercet.js"
-  },
-  "dependencies": {
-    "@hono/node-server": "^1.18.1",
-    "dotenv": "^17.2.1",
-    "hono": "^4.8.12",
-    "jsonwebtoken": "^9.0.2",
-    "node-pty": "^1.0.0",
-    "patch-package": "^8.0.0",
-    "simple-git": "^3.28.0",
-    "socket.io": "^4.8.1"
-  },
-  "devDependencies": {
-    "@types/node": "^20.19.10",
-    "@yao-pkg/pkg": "^6.6.0",
-    "esbuild": "^0.25.8",
-    "tsx": "^4.7.1",
-    "typescript": "^5.8.3"
-  }
+	"name": "homebrew-supercet",
+	"type": "module",
+	"version": "0.3.7",
+	"scripts": {
+		"dev": "tsx watch src/index.ts",
+		"build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/supercet.js --external:node-pty --external:*.node --minify --define:process.env.SUPERCET_VERSION='\"'$(node -p 'require(\"./package.json\").version')'\"' --define:process.env.SUPERCET_URL='\"'${SUPERCET_URL:-https://supercet.com}'\"'",
+		"bundle:arm64": "pkg . --compress GZip --targets node22-macos-arm64 --output dist/bundle/supercet-arm64",
+		"bundle:x64": "pkg . --compress GZip --targets node22-macos-x64 --output dist/bundle/supercet-x64",
+		"start": "node dist/supercet.js",
+		"build-bundle": "npm run build && npm run bundle",
+		"tap:update": "ruby scripts/update-formula.rb",
+		"tap:test": "brew install --build-from-source ./Formula/supercet.rb",
+		"tap:uninstall": "brew uninstall supercet",
+		"postinstall": "patch-package"
+	},
+	"bin": {
+		"supercet": "dist/supercet.js"
+	},
+	"pkg": {
+		"assets": [
+			"node_modules/**/node-pty/build/Release/pty.node",
+			"node_modules/**/node-pty/build/Debug/pty.node",
+			"node_modules/**/node-pty/build/Release/spawn-helper",
+			"node_modules/**/node-pty/build/Debug/spawn-helper"
+		],
+		"scripts": "dist/supercet.js"
+	},
+	"dependencies": {
+		"@hono/node-server": "^1.18.1",
+		"dotenv": "^17.2.1",
+		"hono": "^4.8.12",
+		"jsonwebtoken": "^9.0.2",
+		"node-pty": "^1.0.0",
+		"patch-package": "^8.0.0",
+		"prettier": "^3.6.2",
+		"simple-git": "^3.28.0",
+		"socket.io": "^4.8.1"
+	},
+	"devDependencies": {
+		"@types/node": "^20.19.10",
+		"@yao-pkg/pkg": "^6.6.0",
+		"esbuild": "^0.25.8",
+		"tsx": "^4.7.1",
+		"typescript": "^5.8.3"
+	}
 }
