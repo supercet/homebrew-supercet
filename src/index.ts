@@ -51,7 +51,7 @@ const authenticatedSockets = new Map<string, AuthenticatedSocket>();
 // File watcher state
 let fileWatcher: fs.FSWatcher | null = null;
 let debounceTimeout: NodeJS.Timeout | null = null;
-const DEBOUNCE_DELAY = 1000; // 1 second debounce
+const DEBOUNCE_DELAY = 300; // Reduced from 1 second to 300ms for more responsive updates
 let isBroadcastingGitUpdates = false; // Prevent recursive broadcasts
 let gitignorePatterns: string[] = [];
 const fileHashes = new Map<string, string>(); // Track file content hashes
@@ -546,11 +546,6 @@ async function startServer() {
 				'file:write socket',
 			);
 
-			// Invalidate cache for the written file
-			if (result.success) {
-				invalidateFileHashCache([pathValidation.path!]);
-			}
-
 			socket.emit('file:write:update', result);
 		});
 
@@ -708,26 +703,60 @@ async function startServer() {
 	}
 
 	function hasFileChanged(filePath: string): boolean {
-		const fullPath = path.join(process.cwd(), filePath);
-		const newHash = getFileHash(fullPath);
-		const oldHash = fileHashes.get(fullPath);
+		// filePath is already the full absolute path from the file watcher
+		const newHash = getFileHash(filePath);
+		const oldHash = fileHashes.get(filePath);
 
 		// If file was deleted, consider it changed
 		if (newHash === null) {
 			if (oldHash !== undefined) {
-				fileHashes.delete(fullPath);
+				fileHashes.delete(filePath);
 				return true;
 			}
+			// File not found (was never tracked
 			return false;
 		}
 
 		// If this is a new file or content changed
 		if (oldHash !== newHash) {
-			fileHashes.set(fullPath, newHash);
+			fileHashes.set(filePath, newHash);
 			return true;
 		}
 
+		// File unchanged
 		return false;
+	}
+
+	/**
+	 * Initialize file hash cache for existing files
+	 * This ensures we have a baseline for detecting changes
+	 */
+	function initializeFileHashCache() {
+		try {
+			const watchDir = process.cwd();
+
+			// Walk through the directory and cache existing files
+			function walkDir(dir: string) {
+				const files = fs.readdirSync(dir);
+				for (const file of files) {
+					const fullPath = path.join(dir, file);
+					const stat = fs.statSync(fullPath);
+
+					if (stat.isDirectory() && !file.startsWith('.')) {
+						walkDir(fullPath);
+					} else if (stat.isFile() && !shouldIgnoreFile(file)) {
+						const hash = getFileHash(fullPath);
+						if (hash) {
+							fileHashes.set(fullPath, hash);
+						}
+					}
+				}
+			}
+
+			walkDir(watchDir);
+		} catch (error) {
+			console.error('Failed to initialize file hash cache:', error);
+		}
 	}
 
 	function invalidateFileHashCache(specificFiles?: string[]) {
@@ -761,6 +790,9 @@ async function startServer() {
 
 			gitignorePatterns = parsedPatterns;
 
+			// Initialize file hash cache for existing files
+			initializeFileHashCache();
+
 			// Watch for file changes in the current directory
 			fileWatcher = fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
 				if (!filename) return;
@@ -779,14 +811,30 @@ async function startServer() {
 					return;
 				}
 
-				// Check if file content actually changed
+				// Convert relative filename to absolute path for consistent handling
 				const fullPath = path.join(watchDir, filename);
-				if (!hasFileChanged(fullPath)) {
-					return;
-				}
 
-				// Trigger git updates for relevant file changes
-				broadcastGitUpdates();
+				// For file writes, always check for changes to ensure we don't miss any
+				// This is especially important for rapid successive writes to the same file
+				if (eventType === 'change') {
+					// Add a small delay to ensure the file system has settled
+					setTimeout(() => {
+						if (hasFileChanged(fullPath)) {
+							// Trigger git updates for relevant file changes
+							broadcastGitUpdates();
+						} else {
+							// File content unchanged after delay, skipping
+						}
+					}, 50); // 50ms delay to ensure file system has settled
+				} else {
+					// For other event types (rename, delete), check immediately
+					if (hasFileChanged(fullPath)) {
+						// Trigger git updates for relevant file changes
+						broadcastGitUpdates();
+					} else {
+						// File content unchanged, skipping
+					}
+				}
 			});
 
 			console.log(`\n📂 Watching for file changes in: ${watchDir}\n`);

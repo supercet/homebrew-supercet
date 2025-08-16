@@ -29,7 +29,6 @@ export async function handleSocketGitOperation<T>(
 			data: result,
 		};
 	} catch (error) {
-		console.error(`${operationName} error: ${error}`);
 		return {
 			success: false,
 			error: `Failed for ${operationName.toLowerCase()}: ${error}`,
