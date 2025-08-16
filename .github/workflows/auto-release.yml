@@ -45,14 +45,19 @@ jobs:
             - name: Get previous version from git history
               id: previous-version
               run: |
-                  # Always compare against the main branch for both push and pull_request events
-                  BASE_BRANCH="main"
-                  echo "Comparing against base branch: $BASE_BRANCH"
+                  if [ "${{ github.event_name }}" = "push" ]; then
+                    # For push events, compare against the previous commit
+                    PREVIOUS_VERSION=$(git show HEAD~1:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || echo "0.0.0")
+                    echo "Comparing against previous commit (push event)"
+                  else
+                    # For pull_request events, compare against the main branch
+                    BASE_BRANCH="main"
+                    echo "Comparing against base branch: $BASE_BRANCH (pull_request event)"
+                    PREVIOUS_VERSION=$(git show origin/$BASE_BRANCH:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || echo "0.0.0")
+                  fi
 
-                  # Get the version from the main branch
-                  PREVIOUS_VERSION=$(git show origin/$BASE_BRANCH:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || echo "0.0.0")
                   echo "previous-version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
-                  echo "Previous version from $BASE_BRANCH: $PREVIOUS_VERSION"
+                  echo "Previous version: $PREVIOUS_VERSION"
 
             - name: Check if version has changed
               id: version-changed
