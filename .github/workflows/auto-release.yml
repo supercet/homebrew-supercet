@@ -1,196 +1,206 @@
 name: Auto Release
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "src/**"
-      - "package.json"
-      - "patches/**"
-      - "scripts/**"
-      - ".github/workflows/**"
-  pull_request:
-    paths:
-      - "src/**"
-      - "package.json"
-      - "patches/**"
-      - "scripts/**"
-      - ".github/workflows/**"
+    push:
+        branches:
+            - main
+        paths:
+            - 'src/**'
+            - 'package.json'
+            - 'patches/**'
+            - 'scripts/**'
+            - '.github/workflows/**'
+    pull_request:
+        paths:
+            - 'src/**'
+            - 'package.json'
+            - 'patches/**'
+            - 'scripts/**'
+            - '.github/workflows/**'
 
 # Cancel superseded PR builds on the same branch
 concurrency:
-  group: pr-${{ github.ref }}
-  cancel-in-progress: true
+    group: pr-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  # --- Check version for both push and pull_request events ---
-  check-version:
-    runs-on: ubuntu-latest
-    outputs:
-      isVersionChanged: ${{ steps.version-changed.outputs.isVersionChanged }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    # --- Check version for both push and pull_request events ---
+    check-version:
+        runs-on: ubuntu-latest
+        outputs:
+            isVersionChanged: ${{ steps.version-changed.outputs.isVersionChanged }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
 
-      - name: Get current version from package.json
-        id: current-version
-        run: |
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "current-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          echo "Current version: $CURRENT_VERSION"
+            - name: Get current version from package.json
+              id: current-version
+              run: |
+                  CURRENT_VERSION=$(node -p "require('./package.json').version")
+                  echo "current-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+                  echo "Current version: $CURRENT_VERSION"
 
-      - name: Get previous version from git history
-        id: previous-version
-        run: |
-          # Get the previous version from the last commit that changed package.json
-          PREVIOUS_COMMIT=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
-          if [ -n "$PREVIOUS_COMMIT" ]; then
-            PREVIOUS_VERSION=$(git show $PREVIOUS_COMMIT:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
-          else
-            PREVIOUS_VERSION="0.0.0"
-          fi
-          echo "previous-version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
-          echo "Previous version: $PREVIOUS_VERSION"
+            - name: Get previous version from git history
+              id: previous-version
+              run: |
+                  - name: Get previous version from git history
+                  if [ "${{ github.event_name }}" = "pull_request" ]; then
+                    # For pull requests, compare against the base branch (usually main)
+                    BASE_BRANCH="${{ github.base_ref }}"
+                    echo "Pull request detected, comparing against base branch: $BASE_BRANCH"
+                    
+                    # Get the version from the base branch
+                    PREVIOUS_VERSION=$(git show origin/$BASE_BRANCH:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || echo "0.0.0")
+                  else
+                    # For push events, get the previous version from the last commit that changed package.json
+                    PREVIOUS_COMMIT=$(git log --format="%H" --follow -- package.json | head -2 | tail -1)
+                    if [ -n "$PREVIOUS_COMMIT" ]; then
+                      PREVIOUS_VERSION=$(git show $PREVIOUS_COMMIT:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+                    else
+                      PREVIOUS_VERSION="0.0.0"
+                    fi
+                  fi
+                  echo "previous-version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
+                  echo "Previous version: $PREVIOUS_VERSION"
 
-      - name: Check if version has changed
-        id: version-changed
-        run: |
-          if [ "${{ steps.current-version.outputs.current-version }}" != "${{ steps.previous-version.outputs.previous-version }}" ]; then
-            echo "isVersionChanged=true" >> $GITHUB_OUTPUT
-            echo "Version has changed from ${{ steps.previous-version.outputs.previous-version }} to ${{ steps.current-version.outputs.current-version }}"
-          else
-            echo "isVersionChanged=false" >> $GITHUB_OUTPUT
-            echo "Version has not changed (${{ steps.current-version.outputs.current-version }})"
-          fi
+            - name: Check if version has changed
+              id: version-changed
+              run: |
+                  if [ "${{ steps.current-version.outputs.current-version }}" != "${{ steps.previous-version.outputs.previous-version }}" ]; then
+                    echo "isVersionChanged=true" >> $GITHUB_OUTPUT
+                    echo "Version has changed from ${{ steps.previous-version.outputs.previous-version }} to ${{ steps.current-version.outputs.current-version }}"
+                  else
+                    echo "isVersionChanged=false" >> $GITHUB_OUTPUT
+                    echo "Version has not changed (${{ steps.current-version.outputs.current-version }})"
+                  fi
 
-  # --- Fail PR builds when version hasn't changed ---
-  pr-version-check:
-    needs: check-version
-    if: github.event_name == 'pull_request' && needs.check-version.outputs.isVersionChanged == 'false'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Fail - Version not changed
-        run: |
-          echo "::error::Pull request requires a version change in package.json"
-          echo "Current version: $(node -p "require('./package.json').version")"
-          echo "Please update the version in package.json before creating a pull request"
-          exit 1
+    # --- Fail PR builds when version hasn't changed ---
+    pr-version-check:
+        needs: check-version
+        if: github.event_name == 'pull_request' && needs.check-version.outputs.isVersionChanged == 'false'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Fail - Version not changed
+              run: |
+                  echo "::error::Pull request requires a version change in package.json"
+                  echo "Current version: $(node -p "require('./package.json').version")"
+                  echo "Please update the version in package.json before creating a pull request"
+                  exit 1
 
-  # --- Unified build job for both PR testing and release building ---
-  build:
-    needs: check-version
-    runs-on: macos-latest
-    if: needs.check-version.outputs.isVersionChanged == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64, x64]
+    # --- Unified build job for both PR testing and release building ---
+    build:
+        needs: check-version
+        runs-on: macos-latest
+        if: needs.check-version.outputs.isVersionChanged == 'true'
+        strategy:
+            fail-fast: false
+            matrix:
+                arch: [arm64, x64]
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
 
-      - name: Setup Node 22 for target architecture
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          architecture: ${{ matrix.arch }}
-          cache: npm
-          cache-dependency-path: package-lock.json
+            - name: Setup Node 22 for target architecture
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+                  architecture: ${{ matrix.arch }}
+                  cache: npm
+                  cache-dependency-path: package-lock.json
 
-      - name: Install deps (postinstall -> patch-package)
-        run: npm i --os darwin --cpu ${{ matrix.arch }}
+            - name: Install deps (postinstall -> patch-package)
+              run: npm i --os darwin --cpu ${{ matrix.arch }}
 
-      - name: Rebuild node-pty for this arch
-        run: npm rebuild node-pty --build-from-source --arch=${{ matrix.arch }}
+            - name: Rebuild node-pty for this arch
+              run: npm rebuild node-pty --build-from-source --arch=${{ matrix.arch }}
 
-      - name: Verify node-pty native assets (portable find)
-        shell: bash
-        run: |
-          set -euo pipefail
-          found_pty=$(find node_modules -path "*/node-pty/build/Release/pty.node" -print -quit || true)
-          found_helper=$(find node_modules -path "*/node-pty/build/Release/spawn-helper" -print -quit || true)
-          if [[ -z "${found_pty}" ]]; then
-            echo "::error::pty.node not found"; find node_modules -path "*/node-pty/build/*" -maxdepth 2 -print || true; exit 1; fi
-          echo "Found pty.node: ${found_pty}"
-          [[ -n "${found_helper}" ]] && echo "Found spawn-helper: ${found_helper}"
+            - name: Verify node-pty native assets (portable find)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  found_pty=$(find node_modules -path "*/node-pty/build/Release/pty.node" -print -quit || true)
+                  found_helper=$(find node_modules -path "*/node-pty/build/Release/spawn-helper" -print -quit || true)
+                  if [[ -z "${found_pty}" ]]; then
+                    echo "::error::pty.node not found"; find node_modules -path "*/node-pty/build/*" -maxdepth 2 -print || true; exit 1; fi
+                  echo "Found pty.node: ${found_pty}"
+                  [[ -n "${found_helper}" ]] && echo "Found spawn-helper: ${found_helper}"
 
-      - name: Build (esbuild)
-        run: |
-          # Set a default SUPERCET_URL if not already set
-          export SUPERCET_URL="${SUPERCET_URL:-https://default-url.example.com}"
-          npm run build
+            - name: Build (esbuild)
+              run: |
+                  # Set a default SUPERCET_URL if not already set
+                  export SUPERCET_URL="${SUPERCET_URL:-https://default-url.example.com}"
+                  npm run build
 
-      - name: Package single executable (pkg)
-        run: |
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            npm run bundle:x64
-          else
-            npm run bundle:arm64
-          fi
+            - name: Package single executable (pkg)
+              run: |
+                  if [ "${{ matrix.arch }}" = "x64" ]; then
+                    npm run bundle:x64
+                  else
+                    npm run bundle:arm64
+                  fi
 
-      - name: Upload binary artifact (only on push)
-        if: github.event_name == 'push'
-        uses: actions/upload-artifact@v4
-        with:
-          name: supercet-${{ matrix.arch }}
-          path: dist/bundle/
+            - name: Upload binary artifact (only on push)
+              if: github.event_name == 'push'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: supercet-${{ matrix.arch }}
+                  path: dist/bundle/
 
-  release:
-    needs: [check-version, build]
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && needs.check-version.outputs.isVersionChanged == 'true'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    release:
+        needs: [check-version, build]
+        permissions:
+            contents: write
+        runs-on: ubuntu-latest
+        if: github.event_name == 'push' && needs.check-version.outputs.isVersionChanged == 'true'
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: supercet-arm64
-          path: dist/bundle
+            - name: Download artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: supercet-arm64
+                  path: dist/bundle
 
-      - name: Download x64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: supercet-x64
-          path: dist/bundle
+            - name: Download x64 artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: supercet-x64
+                  path: dist/bundle
 
-      - name: Get version for tag
-        id: version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Creating release for version: $VERSION"
+            - name: Get version for tag
+              id: version
+              run: |
+                  VERSION=$(node -p "require('./package.json').version")
+                  echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  echo "Creating release for version: $VERSION"
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          files: |
-            dist/bundle/supercet-arm64
-            dist/bundle/supercet-x64
-          draft: false
-          prerelease: false
+            - name: Create Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: v${{ steps.version.outputs.version }}
+                  files: |
+                      dist/bundle/supercet-arm64
+                      dist/bundle/supercet-x64
+                  draft: false
+                  prerelease: false
 
-      - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.2"
+            - name: Setup Ruby
+              uses: ruby/setup-ruby@v1
+              with:
+                  ruby-version: '3.2'
 
-      - name: Update Homebrew Formula
-        run: |
-          ./scripts/update-formula.rb
+            - name: Update Homebrew Formula
+              run: |
+                  ./scripts/update-formula.rb
 
-      - name: Commit and push formula updates
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add Formula/supercet.rb
-          git commit -m "Update formula for version ${{ steps.version.outputs.version }}"
-          git push
+            - name: Commit and push formula updates
+              run: |
+                  git config --local user.email "action@github.com"
+                  git config --local user.name "GitHub Action"
+                  git add Formula/supercet.rb
+                  git commit -m "Update formula for version ${{ steps.version.outputs.version }}"
+                  git push
