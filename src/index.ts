@@ -7,8 +7,8 @@ import type { Server as HTTPServer } from 'node:http';
 import pty from 'node-pty';
 import os from 'os';
 import fs from 'fs';
+import path from 'path';
 import 'dotenv/config';
-
 import { handleSocketGitOperation, gitOperations } from './utils/gitHelpers';
 import { isPortAvailable, checkForUpdates } from './utils/routeHelpers';
 
@@ -42,6 +42,13 @@ interface AuthenticatedSocket {
 
 // Map to store authenticated socket information
 const authenticatedSockets = new Map<string, AuthenticatedSocket>();
+
+// File watcher state
+let fileWatcher: fs.FSWatcher | null = null;
+let debounceTimeout: NodeJS.Timeout | null = null;
+const DEBOUNCE_DELAY = 1000; // 1 second debounce
+let isBroadcastingGitUpdates = false; // Prevent recursive broadcasts
+let gitignorePatterns: string[] = [];
 
 const app = new Hono();
 
@@ -498,12 +505,178 @@ async function startServer() {
 		});
 	});
 
+	// File watcher functionality
+	function broadcastGitUpdates() {
+		if (isBroadcastingGitUpdates) {
+			// Already broadcasting git updates, skipping to prevent infinite loop
+			return;
+		}
+
+		if (debounceTimeout) {
+			clearTimeout(debounceTimeout);
+		}
+
+		debounceTimeout = setTimeout(async () => {
+			if (isBroadcastingGitUpdates) {
+				// Broadcast already in progress, skipping
+				return;
+			}
+
+			isBroadcastingGitUpdates = true;
+
+			try {
+				const authenticatedCount = authenticatedSockets.size;
+
+				// Get git status and diff for all authenticated clients
+				const statusResult = await handleSocketGitOperation(gitOperations.status, 'get git status');
+				const diffResult = await handleSocketGitOperation(() => gitOperations.diff(), 'get git diff');
+
+				// Broadcast to all authenticated sockets
+				for (const [socketId] of authenticatedSockets) {
+					const socket = io.sockets.sockets.get(socketId);
+					if (socket) {
+						socket.emit('git:status:push', statusResult);
+						socket.emit('git:diff:push', diffResult);
+					}
+				}
+			} catch (error) {
+				console.error('Error broadcasting git updates:', error);
+			} finally {
+				isBroadcastingGitUpdates = false;
+			}
+		}, DEBOUNCE_DELAY);
+	}
+
+	function isGitRepository(dir: string): boolean {
+		try {
+			const gitDir = path.join(dir, '.git');
+			return fs.existsSync(gitDir) && (fs.statSync(gitDir).isDirectory() || fs.statSync(gitDir).isFile());
+		} catch {
+			console.warn('⚠️  Warning: Current directory is not a git repository');
+			console.warn('Initialize git with: git init');
+			return false;
+		}
+	}
+
+	function parseGitignore(dir: string): string[] | null {
+		const gitignorePath = path.join(dir, '.gitignore');
+		const patterns: string[] = [];
+
+		try {
+			if (!fs.existsSync(gitignorePath)) {
+				console.warn('⚠️  Warning: No .gitignore file found. Please create one to enable file watching.');
+				return null; // No .gitignore file found
+			}
+
+			const gitignoreContent = fs.readFileSync(gitignorePath, 'utf8');
+			const lines = gitignoreContent.split('\n');
+
+			for (const line of lines) {
+				const trimmed = line.trim();
+				// Skip empty lines and comments
+				if (trimmed && !trimmed.startsWith('#')) {
+					patterns.push(trimmed);
+				}
+			}
+		} catch (error) {
+			console.warn('Failed reading .gitignore:', error);
+			return null;
+		}
+
+		return patterns;
+	}
+
+	function shouldIgnoreFile(filename: string): boolean {
+		for (const pattern of gitignorePatterns) {
+			// Handle directory patterns (ending with /)
+			if (pattern.endsWith('/')) {
+				if (filename.includes(pattern)) {
+					return true;
+				}
+			}
+			// Handle exact matches and wildcard patterns
+			else if (pattern.includes('*')) {
+				// Simple glob matching for * wildcard
+				const regex = new RegExp(pattern.replace(/\*/g, '.*'));
+				if (regex.test(path.basename(filename))) {
+					return true;
+				}
+			}
+			// Handle exact filename matches
+			else if (filename.includes(pattern)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	function setupFileWatcher() {
+		try {
+			const watchDir = process.cwd();
+
+			// Check if the directory is a git repository and don't start file watcher if not found
+			if (!isGitRepository(watchDir)) {
+				return;
+			}
+
+			// Parse .gitignore patterns
+			const parsedPatterns = parseGitignore(watchDir);
+			// Don't start file watcher if no .gitignore
+			if (parsedPatterns === null) {
+				return;
+			}
+
+			gitignorePatterns = parsedPatterns;
+
+			// Watch for file changes in the current directory
+			fileWatcher = fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
+				if (!filename) return;
+
+				// Use .gitignore patterns to determine if file should be ignored
+				if (shouldIgnoreFile(filename)) {
+					return;
+				}
+
+				// Trigger git updates for relevant file changes
+				broadcastGitUpdates();
+			});
+
+			console.log(`\n📂 Watching for file changes in: ${watchDir}\n`);
+		} catch (error) {
+			console.error('Failed to setup file watcher:', error);
+		}
+	}
+
 	console.log(`Supercet version ${process.env.SUPERCET_VERSION} is running on http://localhost:${PORT}`);
 
-	await checkForUpdates();
 	// Check for updates
+	await checkForUpdates();
 	console.log(`\n⮕ Review your local code changes at \x1b[34m${HOST}/conduit\x1b[0m`);
+
+	// Start file watcher
+	setupFileWatcher();
 }
+
+// Cleanup file watcher on process exit
+process.on('SIGINT', () => {
+	if (fileWatcher) {
+		fileWatcher.close();
+	}
+	if (debounceTimeout) {
+		clearTimeout(debounceTimeout);
+	}
+	process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+	if (fileWatcher) {
+		fileWatcher.close();
+	}
+	if (debounceTimeout) {
+		clearTimeout(debounceTimeout);
+	}
+	process.exit(0);
+});
 
 // Start the server
 startServer().catch((error) => {
