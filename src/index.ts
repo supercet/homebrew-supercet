@@ -8,10 +8,11 @@ import pty from 'node-pty';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import 'dotenv/config';
 import { handleSocketGitOperation, gitOperations } from './utils/gitHelpers';
 import { isPortAvailable, checkForUpdates } from './utils/routeHelpers';
-
+import { validateAndDecodePath, handleFileOperation, fileOperations } from './utils/fileHelpers';
 // Import git route handlers
 import { getBranches } from './git/branches';
 import { postCheckout } from './git/checkout';
@@ -26,6 +27,10 @@ import { getStatus } from './git/status';
 import { postUnstage } from './git/unstage';
 import { getRevParse } from './git/revParse';
 import { getSymbolicRef } from './git/symbolicRef';
+
+// Import file route handlers
+import { getFile } from './file/get';
+import { writeFile } from './file/write';
 
 const PORT = 4444;
 const HOST = process.env.SUPERCET_URL || 'https://supercet.com';
@@ -49,6 +54,7 @@ let debounceTimeout: NodeJS.Timeout | null = null;
 const DEBOUNCE_DELAY = 1000; // 1 second debounce
 let isBroadcastingGitUpdates = false; // Prevent recursive broadcasts
 let gitignorePatterns: string[] = [];
+const fileHashes = new Map<string, string>(); // Track file content hashes
 
 const app = new Hono();
 
@@ -178,6 +184,10 @@ app.get('/api/git/remote', getRemote);
 app.get('/api/git/remotes', getRemotes);
 app.get('/api/git/rev-parse', getRevParse);
 app.get('/api/git/symbolic-ref', getSymbolicRef);
+
+// File routes
+app.get('/api/file/get', getFile);
+app.post('/api/file/write', writeFile);
 
 // Heartbeat route
 app.get('/api/heartbeat', (c) => {
@@ -379,6 +389,12 @@ async function startServer() {
 				() => gitOperations.stage(params.files, params.areFilesUntracked),
 				'stage git files',
 			);
+
+			// Invalidate cache for staged files
+			if (result.success) {
+				invalidateFileHashCache(params.files);
+			}
+
 			socket.emit('git:stage:update', result);
 		});
 
@@ -396,6 +412,12 @@ async function startServer() {
 				() => gitOperations.unstage(params.files),
 				'unstage git files',
 			);
+
+			// Invalidate cache for unstaged files
+			if (result.success) {
+				invalidateFileHashCache(params.files);
+			}
+
 			socket.emit('git:unstage:update', result);
 		});
 
@@ -413,6 +435,12 @@ async function startServer() {
 				() => gitOperations.commit(params.message),
 				'commit git changes',
 			);
+
+			// Clear entire cache after commit since it affects staged files
+			if (result.success) {
+				invalidateFileHashCache();
+			}
+
 			socket.emit('git:commit:update', result);
 		});
 
@@ -446,6 +474,18 @@ async function startServer() {
 				() => gitOperations.checkout(params.target, params.isFile || false),
 				'checkout git branch',
 			);
+
+			// Clear cache after checkout since it can change many files
+			if (result.success) {
+				if (params.isFile) {
+					// For file checkout, only invalidate that specific file
+					invalidateFileHashCache([params.target]);
+				} else {
+					// For branch checkout, clear entire cache
+					invalidateFileHashCache();
+				}
+			}
+
 			socket.emit('git:checkout:update', result);
 		});
 
@@ -465,6 +505,53 @@ async function startServer() {
 				'symbolic ref git remote',
 			);
 			socket.emit('git:symbolic-ref:update', result);
+		});
+
+		// Handle file:get
+		socket.on('file:get', async (params: { path: string }) => {
+			// Validate and decode path
+			const pathValidation = validateAndDecodePath(params?.path);
+			if (!pathValidation.isValid) {
+				socket.emit('file:get:update', {
+					success: false,
+					error: pathValidation.error,
+				});
+				return;
+			}
+
+			// Perform file read operation
+			const result = await handleFileOperation(
+				() => fileOperations.readFile(params.path, pathValidation.path!),
+				'file:get socket',
+			);
+
+			socket.emit('file:get:update', result);
+		});
+
+		// Handle file:write
+		socket.on('file:write', async (params: { path: string; content: string }) => {
+			// Validate and decode path
+			const pathValidation = validateAndDecodePath(params?.path);
+			if (!pathValidation.isValid) {
+				socket.emit('file:write:update', {
+					success: false,
+					error: pathValidation.error,
+				});
+				return;
+			}
+
+			// Perform file write operation
+			const result = await handleFileOperation(
+				() => fileOperations.writeFile(params.path, pathValidation.path!, params.content),
+				'file:write socket',
+			);
+
+			// Invalidate cache for the written file
+			if (result.success) {
+				invalidateFileHashCache([pathValidation.path!]);
+			}
+
+			socket.emit('file:write:update', result);
 		});
 
 		const cols = 80;
@@ -610,6 +697,52 @@ async function startServer() {
 		return false;
 	}
 
+	function getFileHash(filePath: string): string | null {
+		try {
+			const content = fs.readFileSync(filePath);
+			return crypto.createHash('md5').update(content).digest('hex');
+		} catch (error) {
+			// File might have been deleted or is temporarily inaccessible
+			return null;
+		}
+	}
+
+	function hasFileChanged(filePath: string): boolean {
+		const fullPath = path.join(process.cwd(), filePath);
+		const newHash = getFileHash(fullPath);
+		const oldHash = fileHashes.get(fullPath);
+
+		// If file was deleted, consider it changed
+		if (newHash === null) {
+			if (oldHash !== undefined) {
+				fileHashes.delete(fullPath);
+				return true;
+			}
+			return false;
+		}
+
+		// If this is a new file or content changed
+		if (oldHash !== newHash) {
+			fileHashes.set(fullPath, newHash);
+			return true;
+		}
+
+		return false;
+	}
+
+	function invalidateFileHashCache(specificFiles?: string[]) {
+		if (specificFiles && specificFiles.length > 0) {
+			// Clear hashes for specific files
+			for (const file of specificFiles) {
+				const fullPath = path.join(process.cwd(), file);
+				fileHashes.delete(fullPath);
+			}
+		} else {
+			// Clear entire cache for operations that could affect many files
+			fileHashes.clear();
+		}
+	}
+
 	function setupFileWatcher() {
 		try {
 			const watchDir = process.cwd();
@@ -632,8 +765,23 @@ async function startServer() {
 			fileWatcher = fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
 				if (!filename) return;
 
+				// Ignore node-pty temporary files that can cause frequent events
+				if (
+					filename.includes('node-pty-spawn-helper-') ||
+					filename.includes('.tmp') ||
+					filename.includes('/tmp/')
+				) {
+					return;
+				}
+
 				// Use .gitignore patterns to determine if file should be ignored
 				if (shouldIgnoreFile(filename)) {
+					return;
+				}
+
+				// Check if file content actually changed
+				const fullPath = path.join(watchDir, filename);
+				if (!hasFileChanged(fullPath)) {
 					return;
 				}
 
@@ -665,6 +813,7 @@ process.on('SIGINT', () => {
 	if (debounceTimeout) {
 		clearTimeout(debounceTimeout);
 	}
+	fileHashes.clear();
 	process.exit(0);
 });
 
@@ -675,6 +824,7 @@ process.on('SIGTERM', () => {
 	if (debounceTimeout) {
 		clearTimeout(debounceTimeout);
 	}
+	fileHashes.clear();
 	process.exit(0);
 });
 
