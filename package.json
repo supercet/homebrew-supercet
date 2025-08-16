@@ -1,14 +1,14 @@
 {
 	"name": "homebrew-supercet",
 	"type": "module",
-	"version": "0.3.7",
+	"version": "0.3.8",
 	"scripts": {
 		"dev": "tsx watch src/index.ts",
 		"build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/supercet.js --external:node-pty --external:*.node --minify --define:process.env.SUPERCET_VERSION='\"'$(node -p 'require(\"./package.json\").version')'\"' --define:process.env.SUPERCET_URL='\"'${SUPERCET_URL:-https://supercet.com}'\"'",
 		"bundle:arm64": "pkg . --compress GZip --targets node22-macos-arm64 --output dist/bundle/supercet-arm64",
 		"bundle:x64": "pkg . --compress GZip --targets node22-macos-x64 --output dist/bundle/supercet-x64",
 		"start": "node dist/supercet.js",
-		"build-bundle": "npm run build && npm run bundle",
+		"local": "npm run build && npm run bundle:arm64",
 		"tap:update": "ruby scripts/update-formula.rb",
 		"tap:test": "brew install --build-from-source ./Formula/supercet.rb",
 		"tap:uninstall": "brew uninstall supercet",
