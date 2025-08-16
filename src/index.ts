@@ -157,8 +157,6 @@ app.use('*', async (c, next) => {
 	}
 });
 
-console.log('change me');
-
 // Git routes
 app.get('/api/git/branches', getBranches);
 app.post('/api/git/checkout', postCheckout);
