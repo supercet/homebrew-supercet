@@ -34,6 +34,7 @@ import { writeFile } from './file/write';
 
 const PORT = 4444;
 const HOST = process.env.SUPERCET_URL || 'https://supercet.com';
+const isDebugMode = process.env.DEBUG === 'true';
 
 /**
  * Interface for tracking authenticated socket connections with token expiration management.
@@ -257,7 +258,9 @@ async function startServer() {
 
 	// Socket.IO event handlers
 	io.on('connection', (socket) => {
-		console.log(`🔌 WebSocket client connected: ${socket.id}`);
+		if (isDebugMode) {
+			console.log(`🔌 WebSocket client connected: ${socket.id}`);
+		}
 
 		// Handle client authentication
 		socket.on('authenticate', (token: string) => {
@@ -570,7 +573,9 @@ async function startServer() {
 
 		// Handle disconnect
 		socket.on('disconnect', () => {
-			console.log(`WebSocket client disconnected: ${socket.id}`);
+			if (isDebugMode) {
+				console.log(`WebSocket client disconnected: ${socket.id}`);
+			}
 
 			// Clean up authenticated socket tracking
 			const existingAuth = authenticatedSockets.get(socket.id);
