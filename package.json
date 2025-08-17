@@ -1,10 +1,10 @@
 {
 	"name": "homebrew-supercet",
 	"type": "module",
-	"version": "0.5.1",
+	"version": "0.5.2",
 	"scripts": {
 		"dev": "tsx watch src/index.ts",
-		"build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/supercet.js --external:node-pty --external:*.node --minify --define:process.env.SUPERCET_VERSION='\"'$(node -p 'require(\"./package.json\").version')'\"' --define:process.env.SUPERCET_URL='\"'$(grep SUPERCET_URL .env 2>/dev/null | cut -d '=' -f2 || echo 'https://supercet.com')'\"'",
+		"build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/supercet.js --external:node-pty --external:*.node --minify --define:process.env.SUPERCET_VERSION='\"'$(node -p 'require(\"./package.json\").version')'\"' --define:process.env.SUPERCET_URL='\"'$(grep SUPERCET_URL .env 2>/dev/null | cut -d '=' -f2 || echo 'https://supercet.com')'\"' --define:process.env.DEBUG='\"'$(grep DEBUG .env 2>/dev/null | cut -d '=' -f2  || echo 'false')'\"'",
 		"bundle:arm64": "pkg . --compress GZip --targets node22-macos-arm64 --output dist/bundle/supercet-arm64",
 		"bundle:x64": "pkg . --compress GZip --targets node22-macos-x64 --output dist/bundle/supercet-x64",
 		"start": "node dist/supercet.js",
