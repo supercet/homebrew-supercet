@@ -260,6 +260,24 @@ async function startServer() {
 	io.on('connection', (socket) => {
 		if (isDebugMode) {
 			console.log(`🔌 WebSocket client connected: ${socket.id}`);
+			
+			// Add debug logging middleware for all socket events
+			const originalOn = socket.on.bind(socket);
+			const originalEmit = socket.emit.bind(socket);
+			
+			// Log incoming messages
+			socket.on = function(event: string, listener: (...args: any[]) => void) {
+				return originalOn(event, (...args: any[]) => {
+					console.log(`📥 [${socket.id}] Received: ${event}`, args.length > 0 ? args : '');
+					return listener(...args);
+				});
+			};
+			
+			// Log outgoing messages
+			socket.emit = function(event: string, ...args: any[]) {
+				console.log(`📤 [${socket.id}] Sent: ${event}`, args.length > 0 ? args : '');
+				return originalEmit(event, ...args);
+			};
 		}
 
 		// Handle client authentication
@@ -552,29 +570,116 @@ async function startServer() {
 			socket.emit('file:write:update', result);
 		});
 
-		const cols = 80;
-		const rows = 24;
+		let ptyProcess: ReturnType<typeof spawnLoginShell> | null = null;
 
-		const ptyProcess = spawnLoginShell(cols, rows);
-		// Server -> Client: stream data
-		ptyProcess.onData((data) => {
-			socket.emit('terminal:data', data);
+		// Handle terminal initialization  
+		socket.on('terminal:init', ({ cols = 80, rows = 24 }: { cols?: number; rows?: number } = {}) => {
+			// Allow reinitializing after termination by removing the existing check
+			if (ptyProcess) {
+				// Clean up existing terminal first
+				try {
+					ptyProcess.kill();
+					ptyProcess = null;
+				} catch (error) {
+					console.error('Error cleaning up existing terminal during reinit:', error);
+				}
+			}
+
+			try {
+				ptyProcess = spawnLoginShell(cols, rows);
+				
+				// Server -> Client: stream data
+				ptyProcess.onData((data) => {
+					socket.emit('terminal:data', data);
+				});
+
+				socket.emit('terminal:init:update', {
+					success: true,
+					message: 'Terminal initialized successfully',
+				});
+			} catch (error) {
+				socket.emit('terminal:init:update', {
+					success: false,
+					error: `Failed to initialize terminal: ${error}`,
+				});
+			}
+		});
+
+		// Handle terminal termination
+		socket.on('terminal:terminate', () => {
+			if (!ptyProcess) {
+				socket.emit('terminal:terminate:update', {
+					success: false,
+					error: 'No terminal to terminate',
+				});
+				return;
+			}
+
+			try {
+				ptyProcess.kill();
+				ptyProcess = null;
+				
+				socket.emit('terminal:terminate:update', {
+					success: true,
+					message: 'Terminal terminated successfully',
+				});
+			} catch (error) {
+				socket.emit('terminal:terminate:update', {
+					success: false,
+					error: `Failed to terminate terminal: ${error}`,
+				});
+			}
 		});
 
 		// Client -> Server: user input
 		socket.on('terminal:input', (data: string) => {
+			if (!ptyProcess) {
+				socket.emit('terminal:input:update', {
+					success: false,
+					error: 'No terminal available. Please initialize a terminal first.',
+				});
+				return;
+			}
 			ptyProcess.write(data);
 		});
 
 		// Resize from client
 		socket.on('terminal:resize', ({ cols, rows }: { cols: number; rows: number }) => {
-			if (cols && rows) ptyProcess.resize(cols, rows);
+			if (!ptyProcess) {
+				socket.emit('terminal:resize:update', {
+					success: false,
+					error: 'No terminal available. Please initialize a terminal first.',
+				});
+				return;
+			}
+			if (!cols || !rows) {
+				socket.emit('terminal:resize:update', {
+					success: false,
+					error: 'Invalid dimensions. Both cols and rows must be provided.',
+				});
+				return;
+			}
+			ptyProcess.resize(cols, rows);
+			socket.emit('terminal:resize:update', {
+				success: true,
+				message: `Terminal resized to ${cols}x${rows}`,
+			});
 		});
 
 		// Handle disconnect
 		socket.on('disconnect', () => {
 			if (isDebugMode) {
 				console.log(`WebSocket client disconnected: ${socket.id}`);
+			}
+
+			// Clean up terminal if active
+			if (ptyProcess) {
+				try {
+					ptyProcess.kill();
+					ptyProcess = null;
+				} catch (error) {
+					console.error('Error cleaning up terminal on disconnect:', error);
+				}
 			}
 
 			// Clean up authenticated socket tracking
