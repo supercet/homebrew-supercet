@@ -57,10 +57,20 @@ export const gitOperations = {
 		return args.length ? await git.diff(args) : await git.diff();
 	},
 
-	remotes: async () => await git.remote(['show']),
+	remotes: async () => {
+		const remotes = await git.remote(['show']);
+		if (typeof remotes === 'string') {
+			return remotes.trim();
+		}
+		return remotes;
+	},
 
 	remote: async (remoteName: string) => {
-		return await git.remote(['get-url', remoteName]);
+		const remote = await git.remote(['get-url', remoteName]);
+		if (typeof remote === 'string') {
+			return remote.trim();
+		}
+		return remote;
 	},
 	revParse: async (ref: string, remote?: string) => {
 		const args = remote ? [`${remote}/${ref}`] : [ref];
@@ -75,7 +85,11 @@ export const gitOperations = {
 	},
 
 	symbolicRef: async (remote: string, ref: string = 'HEAD') => {
-		return await git.raw(['symbolic-ref', '--short', `refs/remotes/${remote}/${ref}`]);
+		const symbolicRef = await git.raw(['symbolic-ref', '--short', `refs/remotes/${remote}/${ref}`]);
+		if (typeof symbolicRef === 'string') {
+			return symbolicRef.trim();
+		}
+		return symbolicRef;
 	},
 
 	unstage: async (files: string[]) => await git.reset(['--', ...files]),
