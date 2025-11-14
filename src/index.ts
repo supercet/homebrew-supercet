@@ -1,6 +1,7 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import https from 'node:https';
 import { ContentfulStatusCode } from 'hono/utils/http-status';
 import { Server as SocketIOServer } from 'socket.io';
 import type { Server as HTTPServer } from 'node:http';
@@ -202,9 +203,16 @@ async function startServer() {
 	}
 
 	// Create HTTP server using Hono's serve function
+	const cert = fs.readFileSync('127.0.0.1.pem');
+	const key = fs.readFileSync('127.0.0.1-key.pem');
 	const httpServer = serve({
 		fetch: app.fetch,
+		createServer: https.createServer,
 		port: PORT,
+		serverOptions: {
+			cert,
+			key,
+		},
 	});
 	const io = new SocketIOServer(httpServer as HTTPServer, {
 		cors: corsConfig,
