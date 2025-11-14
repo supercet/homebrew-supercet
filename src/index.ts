@@ -35,6 +35,12 @@ import { writeFile } from './file/write';
 const PORT = 4444;
 const HOST = process.env.SUPERCET_URL || 'https://supercet.com';
 const isDebugMode = process.env.DEBUG === 'true';
+const corsConfig = {
+	origin: [HOST],
+	allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+	allowHeaders: ['Content-Type', 'Authorization'],
+	credentials: true,
+};
 
 /**
  * Interface for tracking authenticated socket connections with token expiration management.
@@ -123,15 +129,7 @@ export function spawnLoginShell(cols = 80, rows = 24) {
 }
 
 // CORS middleware - allow requests from specified origins
-app.use(
-	'*',
-	cors({
-		origin: [HOST],
-		allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-		allowHeaders: ['Content-Type', 'Authorization'],
-		credentials: true,
-	}),
-);
+app.use('*', cors(corsConfig));
 
 // Authentication middleware
 app.use('*', async (c, next) => {
@@ -208,14 +206,8 @@ async function startServer() {
 		fetch: app.fetch,
 		port: PORT,
 	});
-
-	// Create Socket.IO server
 	const io = new SocketIOServer(httpServer as HTTPServer, {
-		cors: {
-			origin: [HOST],
-			methods: ['GET', 'POST'],
-			credentials: true,
-		},
+		cors: corsConfig,
 	});
 
 	/**
@@ -260,21 +252,21 @@ async function startServer() {
 	io.on('connection', (socket) => {
 		if (isDebugMode) {
 			console.log(`🔌 WebSocket client connected: ${socket.id}`);
-			
+
 			// Add debug logging middleware for all socket events
 			const originalOn = socket.on.bind(socket);
 			const originalEmit = socket.emit.bind(socket);
-			
+
 			// Log incoming messages
-			socket.on = function(event: string, listener: (...args: any[]) => void) {
+			socket.on = function (event: string, listener: (...args: any[]) => void) {
 				return originalOn(event, (...args: any[]) => {
 					console.log(`📥 [${socket.id}] Received: ${event}`, args.length > 0 ? args : '');
 					return listener(...args);
 				});
 			};
-			
+
 			// Log outgoing messages
-			socket.emit = function(event: string, ...args: any[]) {
+			socket.emit = function (event: string, ...args: any[]) {
 				console.log(`📤 [${socket.id}] Sent: ${event}`, args.length > 0 ? args : '');
 				return originalEmit(event, ...args);
 			};
@@ -572,7 +564,7 @@ async function startServer() {
 
 		let ptyProcess: ReturnType<typeof spawnLoginShell> | null = null;
 
-		// Handle terminal initialization  
+		// Handle terminal initialization
 		socket.on('terminal:init', ({ cols = 80, rows = 24 }: { cols?: number; rows?: number } = {}) => {
 			// Allow reinitializing after termination by removing the existing check
 			if (ptyProcess) {
@@ -587,7 +579,7 @@ async function startServer() {
 
 			try {
 				ptyProcess = spawnLoginShell(cols, rows);
-				
+
 				// Server -> Client: stream data
 				ptyProcess.onData((data) => {
 					socket.emit('terminal:data', data);
@@ -618,7 +610,7 @@ async function startServer() {
 			try {
 				ptyProcess.kill();
 				ptyProcess = null;
-				
+
 				socket.emit('terminal:terminate:update', {
 					success: true,
 					message: 'Terminal terminated successfully',
