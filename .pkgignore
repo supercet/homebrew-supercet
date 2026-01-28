@@ -1,0 +1,8 @@
+.github/
+*.md
+*.test.js
+tsconfig.json
+.prettierrc
+tap.yml
+pnpm-workspace.yaml
+pnpm-lock.yaml
