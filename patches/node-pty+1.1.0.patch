@@ -1,16 +1,8 @@
 diff --git a/node_modules/node-pty/lib/unixTerminal.js b/node_modules/node-pty/lib/unixTerminal.js
-index c21d5f7..e554724 100644
+index 1234567..abcdefg 100644
 --- a/node_modules/node-pty/lib/unixTerminal.js
 +++ b/node_modules/node-pty/lib/unixTerminal.js
-@@ -19,6 +19,7 @@ exports.UnixTerminal = void 0;
-  * Copyright (c) 2016, Daniel Imms (MIT License).
-  * Copyright (c) 2018, Microsoft Corporation (MIT License).
-  */
-+var fs = require("fs");
- var net = require("net");
- var path = require("path");
- var terminal_1 = require("./terminal");
-@@ -43,6 +44,23 @@ catch (outerError) {
+@@ -30,6 +30,23 @@ var helperPath = native.dir + '/spawn-helper';
  helperPath = path.resolve(__dirname, helperPath);
  helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');
  helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked');
@@ -21,16 +13,16 @@ index c21d5f7..e554724 100644
 +        var os = require("os");
 +        var crypto = require("crypto");
 +        var tmp = path.join(
-+        os.tmpdir(),
++            os.tmpdir(),
 +            "node-pty-spawn-helper-" + process.platform + "-" + process.arch + "-" + crypto.randomBytes(6).toString("hex")
 +        );
 +        fs.copyFileSync(helperPath, tmp);
 +        fs.chmodSync(tmp, 0o755);
 +        helperPath = tmp;
-+        } catch (e) {
++    } catch (e) {
 +        console.error("Failed to materialize spawn-helper:", e);
-+        }
 +    }
++}
  var DEFAULT_FILE = 'sh';
  var DEFAULT_NAME = 'xterm';
  var DESTROY_SOCKET_TIMEOUT_MS = 200;

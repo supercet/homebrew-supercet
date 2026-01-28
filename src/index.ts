@@ -32,6 +32,11 @@ import { getSymbolicRef } from './git/symbolicRef';
 import { getFile } from './file/get';
 import { writeFile } from './file/write';
 
+// Import Claude Code route handlers
+import { createSession } from './claude/createSession';
+import { resumeSession } from './claude/resumeSession';
+import { handleClaudeSessionCreate, handleClaudeSessionResume } from './utils/claudeCodeHelpers';
+
 const PORT = 4444;
 const HOST = process.env.SUPERCET_URL || 'https://supercet.com';
 const isDebugMode = process.env.DEBUG === 'true';
@@ -187,6 +192,10 @@ app.get('/api/git/symbolic-ref', getSymbolicRef);
 // File routes
 app.get('/api/file/get', getFile);
 app.post('/api/file/write', writeFile);
+
+// Claude Code session routes
+app.post('/api/claude/session', createSession);
+app.post('/api/claude/session/:sessionId/resume', resumeSession);
 
 // Heartbeat route
 app.get('/api/heartbeat', (c) => {
@@ -561,6 +570,10 @@ async function startServer() {
 
 			socket.emit('file:write:update', result);
 		});
+
+		// Handle Claude Code session creation and resumption
+		handleClaudeSessionCreate(socket, process.cwd());
+		handleClaudeSessionResume(socket, process.cwd());
 
 		let ptyProcess: ReturnType<typeof spawnLoginShell> | null = null;
 
