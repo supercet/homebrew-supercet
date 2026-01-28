@@ -27,10 +27,10 @@ index 1ec12f7..6ddeaf5 100644
  var DEFAULT_NAME = 'xterm';
  var DESTROY_SOCKET_TIMEOUT_MS = 200;
 diff --git a/node_modules/node-pty/lib/utils.js b/node_modules/node-pty/lib/utils.js
-index af7918b..6879bf8 100644
+index af7918b..ac6d98c 100644
 --- a/node_modules/node-pty/lib/utils.js
 +++ b/node_modules/node-pty/lib/utils.js
-@@ -15,6 +15,35 @@ function assign(target) {
+@@ -15,6 +15,34 @@ function assign(target) {
  }
  exports.assign = assign;
  function loadNativeModule(name) {
@@ -52,7 +52,6 @@ index af7918b..6879bf8 100644
 +            try {
 +                var tmpPath = path.join(os.tmpdir(), 'node-pty-' + moduleName + '-' + crypto.randomBytes(6).toString('hex') + '.node');
 +                fs.copyFileSync(possiblePaths[i], tmpPath);
-+                fs.chmodSync(tmpPath, 0o755);
 +                var module = require(tmpPath);
 +                var dir = path.dirname(possiblePaths[i]);
 +                return { dir: dir, module: module };
@@ -66,12 +65,3 @@ index af7918b..6879bf8 100644
      // Check build, debug, and then prebuilds.
      var dirs = ['build/Release', 'build/Debug', "prebuilds/" + process.platform + "-" + process.arch];
      // Check relative to the parent dir for unbundled and then the current dir for bundled
-@@ -25,7 +54,7 @@ function loadNativeModule(name) {
-             var r = relative_1[_a];
-             var dir = r + "/" + d + "/";
-             try {
--                return { dir: dir, module: require(dir + "/" + name + ".node") };
-+                return { dir: dir, module: require(dir + name + ".node") };
-             }
-             catch (e) {
-                 lastError = e;
