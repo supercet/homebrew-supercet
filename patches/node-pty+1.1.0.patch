@@ -2,13 +2,17 @@ diff --git a/node_modules/node-pty/lib/unixTerminal.js b/node_modules/node-pty/l
 index 1ec12f7..6ddeaf5 100644
 --- a/node_modules/node-pty/lib/unixTerminal.js
 +++ b/node_modules/node-pty/lib/unixTerminal.js
-@@ -30,6 +30,23 @@ var helperPath = native.dir + '/spawn-helper';
+@@ -30,6 +30,31 @@ var helperPath = native.dir + '/spawn-helper';
  helperPath = path.resolve(__dirname, helperPath);
  helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');
  helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked');
 +// In pkg/yao-pkg, files under /snapshot are not executable. Copy the helper
 +// to a real temp file and mark it executable.
 +if (process.pkg) {
++    console.error('[node-pty DEBUG] spawn-helper: Running in pkg environment');
++    console.error('[node-pty DEBUG] spawn-helper: Original path:', helperPath);
++    console.error('[node-pty DEBUG] spawn-helper: native.dir:', native.dir);
++
 +    try {
 +        var os = require("os");
 +        var crypto = require("crypto");
@@ -16,11 +20,16 @@ index 1ec12f7..6ddeaf5 100644
 +            os.tmpdir(),
 +            "node-pty-spawn-helper-" + process.platform + "-" + process.arch + "-" + crypto.randomBytes(6).toString("hex")
 +        );
++        console.error('[node-pty DEBUG] spawn-helper: Copying to temp:', tmp);
++
 +        fs.copyFileSync(helperPath, tmp);
 +        fs.chmodSync(tmp, 0o755);
 +        helperPath = tmp;
++
++        console.error('[node-pty DEBUG] spawn-helper: Successfully copied to:', helperPath);
 +    } catch (e) {
-+        console.error("Failed to materialize spawn-helper:", e);
++        console.error('[node-pty DEBUG] spawn-helper: Failed to materialize spawn-helper:', e);
++        console.error('[node-pty DEBUG] spawn-helper: Error details:', e.message, e.code);
 +    }
 +}
  var DEFAULT_FILE = 'sh';
@@ -30,7 +39,7 @@ diff --git a/node_modules/node-pty/lib/utils.js b/node_modules/node-pty/lib/util
 index af7918b..ac6d98c 100644
 --- a/node_modules/node-pty/lib/utils.js
 +++ b/node_modules/node-pty/lib/utils.js
-@@ -15,6 +15,34 @@ function assign(target) {
+@@ -15,6 +15,67 @@ function assign(target) {
  }
  exports.assign = assign;
  function loadNativeModule(name) {
@@ -41,6 +50,12 @@ index af7918b..ac6d98c 100644
 +        var os = require('os');
 +        var crypto = require('crypto');
 +
++        console.error('[node-pty DEBUG] Running in pkg environment');
++        console.error('[node-pty DEBUG] process.platform:', process.platform);
++        console.error('[node-pty DEBUG] process.arch:', process.arch);
++        console.error('[node-pty DEBUG] __dirname:', __dirname);
++        console.error('[node-pty DEBUG] process.execPath:', process.execPath);
++
 +        // Try to find the native module in the snapshot
 +        var moduleName = name + '.node';
 +        var possiblePaths = [
@@ -48,18 +63,47 @@ index af7918b..ac6d98c 100644
 +            path.join(__dirname, '..', 'prebuilds', process.platform + '-' + process.arch, moduleName)
 +        ];
 +
++        console.error('[node-pty DEBUG] Checking possible paths for', moduleName);
++
 +        for (var i = 0; i < possiblePaths.length; i++) {
++            var checkPath = possiblePaths[i];
++            console.error('[node-pty DEBUG] Path', i + ':', checkPath);
++
 +            try {
++                // Check if file exists (this will work with pkg's virtual filesystem)
++                var stats = fs.statSync(checkPath);
++                console.error('[node-pty DEBUG] Found file at', checkPath, 'size:', stats.size);
++
 +                var tmpPath = path.join(os.tmpdir(), 'node-pty-' + moduleName + '-' + crypto.randomBytes(6).toString('hex') + '.node');
-+                fs.copyFileSync(possiblePaths[i], tmpPath);
++                console.error('[node-pty DEBUG] Copying to temp:', tmpPath);
++
++                fs.copyFileSync(checkPath, tmpPath);
++                fs.chmodSync(tmpPath, 0o755);
++
++                console.error('[node-pty DEBUG] Loading module from temp path');
 +                var module = require(tmpPath);
-+                var dir = path.dirname(possiblePaths[i]);
++
++                var dir = path.dirname(checkPath);
++                console.error('[node-pty DEBUG] Successfully loaded native module from', checkPath);
 +                return { dir: dir, module: module };
 +            } catch (e) {
++                console.error('[node-pty DEBUG] Failed to load from path', checkPath);
++                console.error('[node-pty DEBUG] Error:', e.message);
++                console.error('[node-pty DEBUG] Error code:', e.code);
 +                // Continue to next path
 +            }
 +        }
-+        // Fall through to normal loading if pkg-specific loading fails
++
++        // Try to list what's actually in the snapshot
++        console.error('[node-pty DEBUG] Failed all paths, attempting to list directory contents');
++        try {
++            var parentDir = path.join(__dirname, '..');
++            console.error('[node-pty DEBUG] Parent dir:', parentDir);
++            var contents = fs.readdirSync(parentDir);
++            console.error('[node-pty DEBUG] Contents:', contents);
++        } catch (e) {
++            console.error('[node-pty DEBUG] Cannot list directory:', e.message);
++        }
 +    }
 +
      // Check build, debug, and then prebuilds.
