@@ -59,8 +59,8 @@ formula.gsub!(/sha256\s+"[a-f0-9]+"/) do
   count += 1
   if count <= 2
     "sha256 \"#{arm_sha}\""
-  else
-    "sha256 \"#{x64_sha}\""
+  # else
+  #   "sha256 \"#{x64_sha}\""
   end
 end
 

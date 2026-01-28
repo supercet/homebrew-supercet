@@ -11,10 +11,10 @@ class Supercet < Formula
     sha256 "175ad6ad804cb1dd8cd5c47475d146db7226acec985fef35057e9c1872c81827"
   end
 
-  on_intel do
-    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.6.2/supercet-x64"
-    sha256 "515a22c1bfe1d7b103100b07ac18ae87e141ad8a82a42d10fa64f6880c02d5d8"
-  end
+  # on_intel do
+  #   url "https://github.com/supercet/homebrew-supercet/releases/download/v0.6.2/supercet-x64"
+  #   sha256 "515a22c1bfe1d7b103100b07ac18ae87e141ad8a82a42d10fa64f6880c02d5d8"
+  # end
 
   def install
     # Install the pre-compiled binary

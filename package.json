@@ -1,7 +1,7 @@
 {
 	"name": "homebrew-supercet",
 	"type": "module",
-	"version": "0.6.4",
+	"version": "0.6.5",
 	"scripts": {
 		"dev": "tsx watch src/index.ts",
 		"build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/supercet.js --external:node-pty --external:*.node --minify  --define:process.env.SUPERCET_VERSION='\"'$(node -p 'require(\"./package.json\").version')'\"' --define:process.env.SUPERCET_URL='\"'$(grep SUPERCET_URL .env 2>/dev/null | cut -d '=' -f2 || echo 'https://supercet.com')'\"' --define:process.env.DEBUG='\"'$(grep DEBUG .env 2>/dev/null | cut -d '=' -f2  || echo 'false')'\"'",
