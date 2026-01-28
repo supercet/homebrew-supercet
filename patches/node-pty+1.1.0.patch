@@ -16,8 +16,8 @@ index 1ec12f7..6ddeaf5 100644
 +            os.tmpdir(),
 +            "node-pty-spawn-helper-" + process.platform + "-" + process.arch + "-" + crypto.randomBytes(6).toString("hex")
 +        );
-+        var data = fs.readFileSync(helperPath);
-+        fs.writeFileSync(tmp, data, { mode: 0o755 });
++        fs.copyFileSync(helperPath, tmp);
++        fs.chmodSync(tmp, 0o755);
 +        helperPath = tmp;
 +    } catch (e) {
 +        console.error("Failed to materialize spawn-helper:", e);
@@ -51,8 +51,8 @@ index af7918b..6879bf8 100644
 +        for (var i = 0; i < possiblePaths.length; i++) {
 +            try {
 +                var tmpPath = path.join(os.tmpdir(), 'node-pty-' + moduleName + '-' + crypto.randomBytes(6).toString('hex') + '.node');
-+                var data = fs.readFileSync(possiblePaths[i]);
-+                fs.writeFileSync(tmpPath, data, { mode: 0o755 });
++                fs.copyFileSync(possiblePaths[i], tmpPath);
++                fs.chmodSync(tmpPath, 0o755);
 +                var module = require(tmpPath);
 +                var dir = path.dirname(possiblePaths[i]);
 +                return { dir: dir, module: module };
@@ -66,3 +66,12 @@ index af7918b..6879bf8 100644
      // Check build, debug, and then prebuilds.
      var dirs = ['build/Release', 'build/Debug', "prebuilds/" + process.platform + "-" + process.arch];
      // Check relative to the parent dir for unbundled and then the current dir for bundled
+@@ -25,7 +54,7 @@ function loadNativeModule(name) {
+             var r = relative_1[_a];
+             var dir = r + "/" + d + "/";
+             try {
+-                return { dir: dir, module: require(dir + "/" + name + ".node") };
++                return { dir: dir, module: require(dir + name + ".node") };
+             }
+             catch (e) {
+                 lastError = e;
