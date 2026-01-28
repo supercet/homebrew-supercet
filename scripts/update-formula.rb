@@ -21,14 +21,14 @@ urls = {
 
 puts "→ Fetching ARM binary…"
 arm_data = URI.open(urls[:arm]) { |f| f.read }
-puts "→ Fetching x64 binary…"
-x64_data = URI.open(urls[:x64]) { |f| f.read }
+# puts "→ Fetching x64 binary…"
+# x64_data = URI.open(urls[:x64]) { |f| f.read }
 
 arm_sha = Digest::SHA256.hexdigest(arm_data)
-x64_sha = Digest::SHA256.hexdigest(x64_data)
+# x64_sha = Digest::SHA256.hexdigest(x64_data)
 
 puts "→ ARM SHA256: #{arm_sha}"
-puts "→ x64 SHA256: #{x64_sha}"
+# puts "→ x64 SHA256: #{x64_sha}"
 
 unless File.exist?(FORMULA)
   abort "Error: #{FORMULA} not found."
@@ -42,10 +42,10 @@ formula.gsub!(
   %r{url\s+"https://github\.com/supercet/homebrew-supercet/releases/download/v[^/]+/supercet-arm64"},
   "url \"#{urls[:arm]}\""
 )
-formula.gsub!(
-  %r{url\s+"https://github\.com/supercet/homebrew-supercet/releases/download/v[^/]+/supercet-x64"},
-  "url \"#{urls[:x64]}\""
-)
+# formula.gsub!(
+#   %r{url\s+"https://github\.com/supercet/homebrew-supercet/releases/download/v[^/]+/supercet-x64"},
+#   "url \"#{urls[:x64]}\""
+# )
 
 # 2) Update the version
 formula.gsub!(
