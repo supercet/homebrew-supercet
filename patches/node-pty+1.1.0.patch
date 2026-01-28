@@ -1,5 +1,5 @@
 diff --git a/node_modules/node-pty/lib/unixTerminal.js b/node_modules/node-pty/lib/unixTerminal.js
-index 1234567..abcdefg 100644
+index 1ec12f7..6ddeaf5 100644
 --- a/node_modules/node-pty/lib/unixTerminal.js
 +++ b/node_modules/node-pty/lib/unixTerminal.js
 @@ -30,6 +30,23 @@ var helperPath = native.dir + '/spawn-helper';
@@ -26,3 +26,42 @@ index 1234567..abcdefg 100644
  var DEFAULT_FILE = 'sh';
  var DEFAULT_NAME = 'xterm';
  var DESTROY_SOCKET_TIMEOUT_MS = 200;
+diff --git a/node_modules/node-pty/lib/utils.js b/node_modules/node-pty/lib/utils.js
+index af7918b..6879bf8 100644
+--- a/node_modules/node-pty/lib/utils.js
++++ b/node_modules/node-pty/lib/utils.js
+@@ -15,6 +15,34 @@ function assign(target) {
+ }
+ exports.assign = assign;
+ function loadNativeModule(name) {
++    // Handle pkg/yao-pkg bundled executables
++    if (process.pkg) {
++        var path = require('path');
++        var fs = require('fs');
++        var os = require('os');
++        var crypto = require('crypto');
++
++        // Try to find the native module in the snapshot
++        var moduleName = name + '.node';
++        var possiblePaths = [
++            path.join(__dirname, '..', 'build', 'Release', moduleName),
++            path.join(__dirname, '..', 'prebuilds', process.platform + '-' + process.arch, moduleName)
++        ];
++
++        for (var i = 0; i < possiblePaths.length; i++) {
++            try {
++                var tmpPath = path.join(os.tmpdir(), 'node-pty-' + moduleName + '-' + crypto.randomBytes(6).toString('hex'));
++                fs.copyFileSync(possiblePaths[i], tmpPath);
++                var module = require(tmpPath);
++                var dir = path.dirname(possiblePaths[i]);
++                return { dir: dir, module: module };
++            } catch (e) {
++                // Continue to next path
++            }
++        }
++        // Fall through to normal loading if pkg-specific loading fails
++    }
++
+     // Check build, debug, and then prebuilds.
+     var dirs = ['build/Release', 'build/Debug', "prebuilds/" + process.platform + "-" + process.arch];
+     // Check relative to the parent dir for unbundled and then the current dir for bundled

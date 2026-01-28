@@ -16,7 +16,7 @@ puts "→ Detected version: #{version}"
 base_url = "https://github.com/supercet/homebrew-supercet/releases/download/v#{version}"
 urls = {
   arm:  "#{base_url}/supercet-arm64",
-  x64:  "#{base_url}/supercet-x64"
+  # x64:  "#{base_url}/supercet-x64"
 }
 
 puts "→ Fetching ARM binary…"
