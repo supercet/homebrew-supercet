@@ -50,7 +50,7 @@ index af7918b..6879bf8 100644
 +
 +        for (var i = 0; i < possiblePaths.length; i++) {
 +            try {
-+                var tmpPath = path.join(os.tmpdir(), 'node-pty-' + moduleName + '-' + crypto.randomBytes(6).toString('hex'));
++                var tmpPath = path.join(os.tmpdir(), 'node-pty-' + moduleName + '-' + crypto.randomBytes(6).toString('hex') + '.node');
 +                fs.copyFileSync(possiblePaths[i], tmpPath);
 +                var module = require(tmpPath);
 +                var dir = path.dirname(possiblePaths[i]);
