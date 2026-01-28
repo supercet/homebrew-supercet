@@ -159,11 +159,11 @@ jobs:
                   name: supercet-arm64
                   path: dist/bundle
 
-            - name: Download x64 artifact
-              uses: actions/download-artifact@v4
-              with:
-                  name: supercet-x64
-                  path: dist/bundle
+            # - name: Download x64 artifact
+            #   uses: actions/download-artifact@v4
+            #   with:
+            #       name: supercet-x64
+            #       path: dist/bundle
 
             - name: Get version for tag
               id: version
@@ -178,7 +178,6 @@ jobs:
                   tag_name: v${{ steps.version.outputs.version }}
                   files: |
                       dist/bundle/supercet-arm64
-                      dist/bundle/supercet-x64
                   draft: false
                   prerelease: false
 
