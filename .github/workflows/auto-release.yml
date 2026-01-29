@@ -108,16 +108,30 @@ jobs:
             - name: Install deps (postinstall -> patch-package)
               run: npm i --os darwin --cpu ${{ matrix.arch }}
 
-            - name: Verify node-pty native assets (portable find)
+            - name: Verify node-pty native assets (prebuilds)
               shell: bash
               run: |
                   set -euo pipefail
-                  found_pty=$(find node_modules -path "*/node-pty/build/Release/pty.node" -print -quit || true)
-                  found_helper=$(find node_modules -path "*/node-pty/build/Release/spawn-helper" -print -quit || true)
-                  if [[ -z "${found_pty}" ]]; then
-                    echo "::error::pty.node not found"; find node_modules -path "*/node-pty/build/*" -maxdepth 2 -print || true; exit 1; fi
-                  echo "Found pty.node: ${found_pty}"
-                  [[ -n "${found_helper}" ]] && echo "Found spawn-helper: ${found_helper}"
+
+                  echo "Runner arch: $(uname -m)"
+                  node -p "process.platform + ' ' + process.arch"
+
+                  echo "node-pty version:"
+                  node -p "require('node-pty/package.json').version"
+
+                  echo "Listing node-pty prebuilds:"
+                  ls -la node_modules/node-pty/prebuilds || true
+                  ls -la node_modules/node-pty/prebuilds/darwin-arm64 || true
+
+                  test -f node_modules/node-pty/prebuilds/darwin-arm64/pty.node
+                  echo "Found pty.node: node_modules/node-pty/prebuilds/darwin-arm64/pty.node"
+
+                  # spawn-helper is present in many builds; keep it as best-effort
+                  if test -f node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper; then
+                    echo "Found spawn-helper: node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper"
+                  else
+                    echo "spawn-helper not found (may be ok depending on node-pty packaging)"
+                  fi
 
             - name: Build (esbuild)
               run: |
