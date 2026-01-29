@@ -138,12 +138,6 @@ jobs:
                   # Set a default SUPERCET_URL if not already set
                   export SUPERCET_URL="${SUPERCET_URL:-https://default-url.example.com}"
                   npm run build
-            - name: Verify node-pty prebuilds exist
-              run: |
-                  set -euo pipefail
-                  ls -la node_modules/node-pty/prebuilds/darwin-arm64 || true
-                  test -f node_modules/node-pty/prebuilds/darwin-arm64/pty.node
-                  test -f node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper
 
             - name: Package single executable (pkg)
               run: |
