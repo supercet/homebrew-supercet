@@ -152,10 +152,6 @@ jobs:
                   else
                     npm run bundle:arm64
                   fi
-            - name: Smoke test packaged binary on runner
-              run: |
-                  set -euo pipefail
-                  ./dist/bundle/supercet-arm64 --version || true
 
             - name: Upload binary artifact (only on push)
               if: github.event_name == 'push'
