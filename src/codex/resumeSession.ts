@@ -1,16 +1,16 @@
 import { Context } from 'hono';
-import { isValidUUID, resolveSupportedCli, resumeHeadlessCliSession } from '../utils/headlessCliHelpers';
+import { isValidUUID, resumeHeadlessCliSession } from '../utils/headlessCliHelpers';
 
 /**
- * REST API handler to resume an existing headless CLI session
- * POST /api/claude/session/:sessionId/resume
- * Body: { prompt: string, workingDir?: string, cli?: 'claude' | 'codex', model?: string }
+ * REST API handler to resume an existing Codex session
+ * POST /api/codex/session/:sessionId/resume
+ * Body: { prompt: string, workingDir?: string, model?: string }
  */
-export async function resumeSession(c: Context) {
+export async function resumeCodexSessionRoute(c: Context) {
 	try {
 		const sessionId = c.req.param('sessionId');
 		const body = await c.req.json();
-		const { prompt, workingDir, cli: requestedCli, model } = body;
+		const { prompt, workingDir, model } = body;
 
 		if (!sessionId || typeof sessionId !== 'string') {
 			return c.json({ error: 'Session ID is required and must be a string' }, 400);
@@ -28,26 +28,19 @@ export async function resumeSession(c: Context) {
 			return c.json({ error: 'Invalid session ID format (must be a valid UUID)' }, 400);
 		}
 
-		let cli: 'claude' | 'codex';
-		try {
-			cli = resolveSupportedCli(requestedCli, 'claude');
-		} catch (error) {
-			return c.json({ error: error instanceof Error ? error.message : 'Invalid cli' }, 400);
-		}
-
 		const targetDir = workingDir || process.cwd();
-		const session = await resumeHeadlessCliSession(cli, sessionId, prompt, targetDir, model);
+		const session = await resumeHeadlessCliSession('codex', sessionId, prompt, targetDir, model);
 
 		return c.json({
 			success: true,
-			cli,
+			cli: 'codex',
 			sessionId: session.sessionId,
 			status: session.status,
 			output: session.output,
 			error: session.error.length > 0 ? session.error : undefined,
 		});
 	} catch (error) {
-		console.error('Error resuming CLI session:', error);
+		console.error('Error resuming Codex session:', error);
 		return c.json(
 			{
 				success: false,

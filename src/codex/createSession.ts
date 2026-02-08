@@ -1,15 +1,15 @@
 import { Context } from 'hono';
-import { createHeadlessCliSession, resolveSupportedCli } from '../utils/headlessCliHelpers';
+import { createHeadlessCliSession } from '../utils/headlessCliHelpers';
 
 /**
- * REST API handler to create a new headless CLI session
- * POST /api/claude/session
- * Body: { prompt: string, workingDir?: string, cli?: 'claude' | 'codex', model?: string }
+ * REST API handler to create a new Codex session
+ * POST /api/codex/session
+ * Body: { prompt: string, workingDir?: string, model?: string }
  */
-export async function createSession(c: Context) {
+export async function createCodexSessionRoute(c: Context) {
 	try {
 		const body = await c.req.json();
-		const { prompt, workingDir, cli: requestedCli, model } = body;
+		const { prompt, workingDir, model } = body;
 
 		if (!prompt || typeof prompt !== 'string') {
 			return c.json({ error: 'Prompt is required and must be a string' }, 400);
@@ -19,26 +19,19 @@ export async function createSession(c: Context) {
 			return c.json({ error: 'Model must be a string' }, 400);
 		}
 
-		let cli: 'claude' | 'codex';
-		try {
-			cli = resolveSupportedCli(requestedCli, 'claude');
-		} catch (error) {
-			return c.json({ error: error instanceof Error ? error.message : 'Invalid cli' }, 400);
-		}
-
 		const targetDir = workingDir || process.cwd();
-		const session = await createHeadlessCliSession(cli, prompt, targetDir, model);
+		const session = await createHeadlessCliSession('codex', prompt, targetDir, model);
 
 		return c.json({
 			success: true,
-			cli,
+			cli: 'codex',
 			sessionId: session.sessionId,
 			status: session.status,
 			output: session.output,
 			error: session.error.length > 0 ? session.error : undefined,
 		});
 	} catch (error) {
-		console.error('Error creating CLI session:', error);
+		console.error('Error creating Codex session:', error);
 		return c.json(
 			{
 				success: false,
