@@ -14,6 +14,7 @@ on:
         paths:
             - 'src/**'
             - 'package.json'
+            - 'Formula/**'
             - 'patches/**'
             - 'scripts/**'
             - '.github/workflows/**'
@@ -73,7 +74,7 @@ jobs:
     # --- Fail PR builds when version hasn't changed (unless manually triggered) ---
     pr-version-check:
         needs: check-version
-        if: github.event_name == 'pull_request' && needs.check-version.outputs.isVersionChanged == 'false'
+        if: github.event_name == 'pull_request' && needs.check-version.outputs.isVersionChanged == 'false' && !startsWith(github.head_ref, 'automation/update-formula-v')
         runs-on: ubuntu-latest
         steps:
             - name: Fail - Version not changed
