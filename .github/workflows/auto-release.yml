@@ -158,6 +158,7 @@ jobs:
         needs: [check-version, build]
         permissions:
             contents: write
+            pull-requests: write
         runs-on: ubuntu-latest
         if: github.event_name == 'push' && needs.check-version.outputs.isVersionChanged == 'true'
         steps:
@@ -201,10 +202,14 @@ jobs:
               run: |
                   ./scripts/update-formula.rb
 
-            - name: Commit and push formula updates
-              run: |
-                  git config --local user.email "action@github.com"
-                  git config --local user.name "GitHub Action"
-                  git add Formula/supercet.rb
-                  git commit -m "Update formula for version ${{ steps.version.outputs.version }}"
-                  git push
+            - name: Create PR for formula updates
+              uses: peter-evans/create-pull-request@v7
+              with:
+                  commit-message: Update formula for version ${{ steps.version.outputs.version }}
+                  branch: automation/update-formula-v${{ steps.version.outputs.version }}
+                  delete-branch: true
+                  title: Update formula for version ${{ steps.version.outputs.version }}
+                  body: |
+                      Automated Homebrew formula update after release `v${{ steps.version.outputs.version }}`.
+                  add-paths: |
+                      Formula/supercet.rb
