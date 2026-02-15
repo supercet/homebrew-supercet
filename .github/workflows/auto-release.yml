@@ -216,7 +216,7 @@ jobs:
             - name: Create PR for formula updates
               uses: peter-evans/create-pull-request@v7
               with:
-                  token: ${{ secrets.PR_AUTOMATION_TOKEN }}
+                  token: ${{ secrets.PR_AUTOMATION_TOKEN || github.token }}
                   commit-message: Update formula for version ${{ steps.version.outputs.version }}
                   branch: automation/update-formula-v${{ steps.version.outputs.version }}
                   delete-branch: true
