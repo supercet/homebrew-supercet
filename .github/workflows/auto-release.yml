@@ -205,7 +205,7 @@ jobs:
 
             - name: Validate PR automation token
               env:
-                  PR_AUTOMATION_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
+                  PR_AUTOMATION_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN || github.token }}
               run: |
                   if [ -z "$PR_AUTOMATION_TOKEN" ]; then
                     echo "::error::Missing PR_AUTOMATION_TOKEN secret."
