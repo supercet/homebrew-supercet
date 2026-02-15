@@ -1,7 +1,7 @@
 {
 	"name": "homebrew-supercet",
 	"type": "module",
-	"version": "0.7.2",
+	"version": "0.7.3",
 	"scripts": {
 		"dev": "tsx watch src/index.ts",
 		"lint": "prettier --check .",
