@@ -66,7 +66,7 @@ function sanitizeForJSON(data: unknown, depth = 0, maxDepth = 50): unknown {
 
 		// Handle arrays
 		if (Array.isArray(obj)) {
-			return obj.map(item => removeCircular(item, currentDepth + 1));
+			return obj.map((item) => removeCircular(item, currentDepth + 1));
 		}
 
 		// Handle plain objects
@@ -75,10 +75,7 @@ function sanitizeForJSON(data: unknown, depth = 0, maxDepth = 50): unknown {
 			for (const key in obj) {
 				if (Object.prototype.hasOwnProperty.call(obj, key)) {
 					try {
-						result[key] = removeCircular(
-							(obj as Record<string, unknown>)[key],
-							currentDepth + 1,
-						);
+						result[key] = removeCircular((obj as Record<string, unknown>)[key], currentDepth + 1);
 					} catch (error) {
 						result[key] = '[Error]';
 					}
@@ -115,7 +112,6 @@ export async function handleSocketGitOperation<T>(
 		let sanitizedSize = 0;
 		try {
 			sanitizedSize = JSON.stringify(sanitizedResult).length;
-
 		} catch (e) {
 			console.warn(`[GitOperation] ${operationName}: Failed to measure size`);
 		}
@@ -127,8 +123,7 @@ export async function handleSocketGitOperation<T>(
 		};
 	} catch (error: unknown) {
 		console.error(`[GitOperation] ${operationName} failed:`, error);
-		const errorMessage =
-			error instanceof Error ? error.message : String(error);
+		const errorMessage = error instanceof Error ? error.message : String(error);
 		return {
 			success: false,
 			error: `Failed for ${operationName.toLowerCase()}: ${errorMessage}`,
