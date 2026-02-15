@@ -203,20 +203,10 @@ jobs:
               run: |
                   ./scripts/update-formula.rb
 
-            - name: Validate PR automation token
-              env:
-                  PR_AUTOMATION_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN || github.token }}
-              run: |
-                  if [ -z "$PR_AUTOMATION_TOKEN" ]; then
-                    echo "::error::Missing PR_AUTOMATION_TOKEN secret."
-                    echo "::error::Set PR_AUTOMATION_TOKEN to a PAT or GitHub App token with contents and pull request write access."
-                    exit 1
-                  fi
-
             - name: Create PR for formula updates
               uses: peter-evans/create-pull-request@v7
               with:
-                  token: ${{ secrets.PR_AUTOMATION_TOKEN || github.token }}
+                  token: ${{ github.token }}
                   commit-message: Update formula for version ${{ steps.version.outputs.version }}
                   branch: automation/update-formula-v${{ steps.version.outputs.version }}
                   delete-branch: true
