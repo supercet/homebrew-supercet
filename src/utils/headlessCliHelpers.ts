@@ -186,15 +186,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 
 	return {
 		command: 'codex',
-		args: [
-			'exec',
-			'--json',
-			'--skip-git-repo-check',
-			'--sandbox',
-			'workspace-write',
-			...modelArgs,
-			options.prompt,
-		],
+		args: ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write', ...modelArgs, options.prompt],
 	};
 }
 
@@ -239,9 +231,7 @@ async function ensureCliAvailable(cli: SupportedCli, workingDir: string): Promis
 				preflight.kill('SIGTERM');
 			} catch {}
 			finish(
-				new Error(
-					`'${cli}' is installed but failed preflight (timeout after ${CLI_PRECHECK_TIMEOUT_MS}ms).`,
-				),
+				new Error(`'${cli}' is installed but failed preflight (timeout after ${CLI_PRECHECK_TIMEOUT_MS}ms).`),
 			);
 		}, CLI_PRECHECK_TIMEOUT_MS);
 
@@ -411,7 +401,7 @@ export async function createHeadlessCliSession(
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
-	): Promise<HeadlessCliSession> {
+): Promise<HeadlessCliSession> {
 	try {
 		validatePrompt(prompt);
 		workingDir = validateWorkingDirectory(workingDir);
@@ -432,7 +422,7 @@ export async function resumeHeadlessCliSession(
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
-	): Promise<HeadlessCliSession> {
+): Promise<HeadlessCliSession> {
 	try {
 		validatePrompt(prompt);
 		workingDir = validateWorkingDirectory(workingDir);
