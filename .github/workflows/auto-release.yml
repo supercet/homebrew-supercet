@@ -159,6 +159,7 @@ jobs:
         needs: [check-version, build]
         permissions:
             contents: write
+            pull-requests: write
         runs-on: ubuntu-latest
         if: github.event_name == 'push' && needs.check-version.outputs.isVersionChanged == 'true'
         steps:
