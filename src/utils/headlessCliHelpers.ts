@@ -34,6 +34,8 @@ interface SocketSessionPayload {
 	model?: string;
 }
 
+export type WorkingDirResolver = string | (() => string);
+
 // Maximum session timeout (10 minutes)
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const CLI_PRECHECK_TIMEOUT_MS = 5000;
@@ -474,7 +476,7 @@ function resolveCli(value: unknown, fallback: SupportedCli): SupportedCli {
 
 export function handleHeadlessSessionCreate(
 	socket: Socket,
-	serverWorkingDir: string,
+	serverWorkingDir: WorkingDirResolver,
 	eventPrefix: string,
 	defaultCli: SupportedCli,
 ) {
@@ -498,7 +500,9 @@ export function handleHeadlessSessionCreate(
 			}
 
 			const cli = resolveCli(data.cli, defaultCli);
-			const targetDir = data.workingDir || serverWorkingDir;
+			const resolvedServerWorkingDir =
+				typeof serverWorkingDir === 'function' ? serverWorkingDir() : serverWorkingDir;
+			const targetDir = data.workingDir || resolvedServerWorkingDir;
 
 			socket.emit(`${eventPrefix}:started`, { message: `${cli} session starting...` });
 
@@ -515,7 +519,7 @@ export function handleHeadlessSessionCreate(
 
 export function handleHeadlessSessionResume(
 	socket: Socket,
-	serverWorkingDir: string,
+	serverWorkingDir: WorkingDirResolver,
 	eventPrefix: string,
 	defaultCli: SupportedCli,
 ) {
@@ -549,7 +553,9 @@ export function handleHeadlessSessionResume(
 			}
 
 			const cli = resolveCli(data.cli, defaultCli);
-			const targetDir = data.workingDir || serverWorkingDir;
+			const resolvedServerWorkingDir =
+				typeof serverWorkingDir === 'function' ? serverWorkingDir() : serverWorkingDir;
+			const targetDir = data.workingDir || resolvedServerWorkingDir;
 
 			socket.emit(`${eventPrefix}:started`, { message: `Resuming ${cli} session...` });
 
