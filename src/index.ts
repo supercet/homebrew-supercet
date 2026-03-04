@@ -33,6 +33,8 @@ import { getSymbolicRef } from './git/symbolicRef';
 // Import file route handlers
 import { getFile } from './file/get';
 import { writeFile } from './file/write';
+import { getDbHealth } from './db/health';
+import { closeSQLite, initializeSQLite } from './db/sqlite';
 
 // Import Claude Code route handlers
 import { createSession } from './claude/createSession';
@@ -459,6 +461,9 @@ app.get('/api/heartbeat', (c) => {
 	return c.json(null, 200);
 });
 
+// SQLite routes
+app.get('/api/db/health', getDbHealth);
+
 // Workspace routes
 app.get('/api/workspaces', (c) => {
 	const workspaces = listWorkspaceSummaries();
@@ -491,6 +496,9 @@ async function startServer() {
 	if (!portAvailable) {
 		throw new Error(`Supercet is already running on port ${PORT}`);
 	}
+
+	const sqliteStatus = initializeSQLite();
+	console.log(`🗄️  SQLite initialized at ${sqliteStatus.dbPath}`);
 
 	// Create HTTP server using Hono's serve function
 	const httpServer = serve({
@@ -1607,6 +1615,7 @@ function cleanupWorkspaces() {
 	workspaceIdByRootPath.clear();
 	isBroadcastingGitUpdates.clear();
 	activeWorkspaceId = null;
+	closeSQLite();
 }
 
 // Cleanup workspace watchers on process exit
