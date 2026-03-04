@@ -1,3 +1,4 @@
+import path from 'path';
 import { simpleGit, type SimpleGit, type SimpleGitOptions } from 'simple-git';
 
 export interface SocketGitResponse {
@@ -6,14 +7,38 @@ export interface SocketGitResponse {
 	error?: string;
 }
 
-const options: Partial<SimpleGitOptions> = {
-	baseDir: process.cwd(),
-	binary: 'git',
-	maxConcurrentProcesses: 6,
-	trimmed: false,
-};
+const gitClientCache = new Map<string, SimpleGit>();
 
-export const git: SimpleGit = simpleGit(options);
+function normalizeBaseDir(baseDir: string): string {
+	return path.resolve(baseDir);
+}
+
+function getGitClient(baseDir: string): SimpleGit {
+	const normalizedBaseDir = normalizeBaseDir(baseDir);
+	const cachedClient = gitClientCache.get(normalizedBaseDir);
+	if (cachedClient) {
+		return cachedClient;
+	}
+
+	const options: Partial<SimpleGitOptions> = {
+		baseDir: normalizedBaseDir,
+		binary: 'git',
+		maxConcurrentProcesses: 6,
+		trimmed: false,
+	};
+
+	const gitClient = simpleGit(options);
+	gitClientCache.set(normalizedBaseDir, gitClient);
+	return gitClient;
+}
+
+export function releaseGitClient(baseDir: string): void {
+	gitClientCache.delete(normalizeBaseDir(baseDir));
+}
+
+export function clearGitClientCache(): void {
+	gitClientCache.clear();
+}
 
 /**
  * Sanitize data to remove circular references and make it JSON-serializable
@@ -134,77 +159,83 @@ export async function handleSocketGitOperation<T>(
 /**
  * Git operation functions that can be passed to the generic handler
  */
-export const gitOperations = {
-	status: async () => await git.status(),
+export function createGitOperations(baseDir: string = process.cwd()) {
+	const git = getGitClient(baseDir);
 
-	branches: async () => await git.branch(['-l']),
+	return {
+		status: async () => await git.status(),
 
-	commits: async (branch?: string, from?: string, to?: string) => {
-		const args = [branch, from, to].filter((item) => item !== undefined && item !== null);
-		return args.length ? await git.log(args) : await git.log();
-	},
+		branches: async () => await git.branch(['-l']),
 
-	diff: async (from?: string, to?: string) => {
-		// '-w', '--ignore-space-at-eol' ignores whitespace but still renders the no newline at end of file marker
-		const args = [from, to, '-w', '--ignore-space-at-eol', '-U5'].filter(
-			(val) => val !== undefined && val !== null && val !== '',
-		) as string[];
-		return args.length ? await git.diff(args) : await git.diff();
-	},
+		commits: async (branch?: string, from?: string, to?: string) => {
+			const args = [branch, from, to].filter((item) => item !== undefined && item !== null);
+			return args.length ? await git.log(args) : await git.log();
+		},
 
-	remotes: async () => {
-		const remotes = await git.remote(['show']);
-		if (typeof remotes === 'string') {
-			return remotes.trim();
-		}
-		return remotes;
-	},
+		diff: async (from?: string, to?: string) => {
+			// '-w', '--ignore-space-at-eol' ignores whitespace but still renders the no newline at end of file marker
+			const args = [from, to, '-w', '--ignore-space-at-eol', '-U5'].filter(
+				(val) => val !== undefined && val !== null && val !== '',
+			) as string[];
+			return args.length ? await git.diff(args) : await git.diff();
+		},
 
-	remote: async (remoteName: string) => {
-		const remote = await git.remote(['get-url', remoteName]);
-		if (typeof remote === 'string') {
-			return remote.trim();
-		}
-		return remote;
-	},
-	revParse: async (ref: string, remote?: string) => {
-		const args = remote ? [`${remote}/${ref}`] : [ref];
-		return await git.revparse(args);
-	},
+		remotes: async () => {
+			const remotes = await git.remote(['show']);
+			if (typeof remotes === 'string') {
+				return remotes.trim();
+			}
+			return remotes;
+		},
 
-	stage: async (files: string[], areFilesUntracked: boolean = false) => {
-		if (areFilesUntracked) {
-			files.unshift('-N');
-		}
-		return await git.add(files);
-	},
+		remote: async (remoteName: string) => {
+			const remote = await git.remote(['get-url', remoteName]);
+			if (typeof remote === 'string') {
+				return remote.trim();
+			}
+			return remote;
+		},
+		revParse: async (ref: string, remote?: string) => {
+			const args = remote ? [`${remote}/${ref}`] : [ref];
+			return await git.revparse(args);
+		},
 
-	symbolicRef: async (remote: string, ref: string = 'HEAD') => {
-		const symbolicRef = await git.raw(['symbolic-ref', '--short', `refs/remotes/${remote}/${ref}`]);
-		if (typeof symbolicRef === 'string') {
-			return symbolicRef.trim();
-		}
-		return symbolicRef;
-	},
+		stage: async (files: string[], areFilesUntracked: boolean = false) => {
+			if (areFilesUntracked) {
+				files.unshift('-N');
+			}
+			return await git.add(files);
+		},
 
-	unstage: async (files: string[]) => await git.reset(['--', ...files]),
+		symbolicRef: async (remote: string, ref: string = 'HEAD') => {
+			const symbolicRef = await git.raw(['symbolic-ref', '--short', `refs/remotes/${remote}/${ref}`]);
+			if (typeof symbolicRef === 'string') {
+				return symbolicRef.trim();
+			}
+			return symbolicRef;
+		},
 
-	commit: async (message: string) => await git.commit(message),
+		unstage: async (files: string[]) => await git.reset(['--', ...files]),
 
-	push: async (remote?: string, branch?: string) => {
-		let targetBranch = branch;
-		if (!targetBranch) {
-			const branchRes = await git.branch();
-			targetBranch = branchRes.current;
-		}
+		commit: async (message: string) => await git.commit(message),
 
-		return git.push(remote, targetBranch);
-	},
+		push: async (remote?: string, branch?: string) => {
+			let targetBranch = branch;
+			if (!targetBranch) {
+				const branchRes = await git.branch();
+				targetBranch = branchRes.current;
+			}
 
-	checkout: async (target: string, isNew: boolean = false) => {
-		if (isNew) {
-			return await git.checkout(['-b', target]);
-		}
-		return await git.checkout([target]);
-	},
-};
+			return git.push(remote, targetBranch);
+		},
+
+		checkout: async (target: string, isNew: boolean = false) => {
+			if (isNew) {
+				return await git.checkout(['-b', target]);
+			}
+			return await git.checkout([target]);
+		},
+	};
+}
+
+export const gitOperations = createGitOperations();

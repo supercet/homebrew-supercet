@@ -23,19 +23,61 @@ export interface FileOperationResponse {
 	error?: string;
 }
 
+export function isPathInside(rootPath: string, targetPath: string): boolean {
+	const relativePath = path.relative(rootPath, targetPath);
+	return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+}
+
+function resolveCanonicalRootPath(workspaceRoot: string): string {
+	const resolvedRootPath = path.resolve(workspaceRoot);
+	try {
+		return fs.realpathSync(resolvedRootPath);
+	} catch {
+		return resolvedRootPath;
+	}
+}
+
+function resolveCanonicalTargetPath(resolvedPath: string): string {
+	try {
+		return fs.realpathSync(resolvedPath);
+	} catch {
+		const parentPath = path.dirname(resolvedPath);
+		try {
+			const realParentPath = fs.realpathSync(parentPath);
+			return path.join(realParentPath, path.basename(resolvedPath));
+		} catch {
+			return resolvedPath;
+		}
+	}
+}
+
 /**
  * Validates and decodes a file path, ensuring it's within the working directory
  */
-export function validateAndDecodePath(rawPath: string): { isValid: boolean; path?: string; error?: string } {
+export function validateAndDecodePath(
+	rawPath: string,
+	workspaceRoot: string = process.cwd(),
+): { isValid: boolean; path?: string; error?: string } {
 	if (!rawPath) {
 		return { isValid: false, error: 'Path is required' };
 	}
 
-	const decodedPath = decodeURIComponent(rawPath);
-	const resolvedPath = path.resolve(process.cwd(), decodedPath);
+	let decodedPath = '';
+	try {
+		decodedPath = decodeURIComponent(rawPath);
+	} catch {
+		return { isValid: false, error: 'Path is not valid URL encoding' };
+	}
+
+	const resolvedRootPath = path.resolve(workspaceRoot);
+	const resolvedPath = path.isAbsolute(decodedPath)
+		? path.resolve(decodedPath)
+		: path.resolve(resolvedRootPath, decodedPath);
+	const canonicalRootPath = resolveCanonicalRootPath(resolvedRootPath);
+	const canonicalTargetPath = resolveCanonicalTargetPath(resolvedPath);
 
 	// Security check: ensure the resolved path is within the current working directory
-	if (!resolvedPath.startsWith(process.cwd())) {
+	if (!isPathInside(canonicalRootPath, canonicalTargetPath)) {
 		return { isValid: false, error: 'Access denied: path outside working directory' };
 	}
 
