@@ -23,7 +23,7 @@ export interface FileOperationResponse {
 	error?: string;
 }
 
-function isPathInside(rootPath: string, targetPath: string): boolean {
+export function isPathInside(rootPath: string, targetPath: string): boolean {
 	const relativePath = path.relative(rootPath, targetPath);
 	return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
 }

@@ -4,15 +4,17 @@ import { cors } from 'hono/cors';
 import { ContentfulStatusCode } from 'hono/utils/http-status';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import type { Server as HTTPServer } from 'node:http';
+import { execFile, type ExecFileException } from 'node:child_process';
 import pty from 'node-pty';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { promisify } from 'node:util';
 import 'dotenv/config';
-import { handleSocketGitOperation, createGitOperations } from './utils/gitHelpers';
+import { handleSocketGitOperation, createGitOperations, releaseGitClient } from './utils/gitHelpers';
 import { isPortAvailable, checkForUpdates } from './utils/routeHelpers';
-import { validateAndDecodePath, handleFileOperation, fileOperations } from './utils/fileHelpers';
+import { validateAndDecodePath, handleFileOperation, fileOperations, isPathInside } from './utils/fileHelpers';
 // Import git route handlers
 import { getBranches } from './git/branches';
 import { postCheckout } from './git/checkout';
@@ -76,17 +78,19 @@ interface WorkspaceContext {
 interface WorkspaceSummary {
 	id: string;
 	path: string;
-	isDefault: boolean;
 	isWatching: boolean;
 	isActive: boolean;
 }
 
 interface WorkspaceStatus {
 	activeWorkspaceId: string | null;
-	defaultWorkspaceId: string | null;
 	activeWorkspace: WorkspaceSummary | null;
-	defaultWorkspace: WorkspaceSummary | null;
 	workspaces: WorkspaceSummary[];
+}
+
+interface DirectorySelectionResult {
+	path: string | null;
+	cancelled: boolean;
 }
 
 // Map to store authenticated socket information
@@ -97,16 +101,26 @@ const workspaceIdByRootPath = new Map<string, string>();
 const workspaceDebounceTimeouts = new Map<string, NodeJS.Timeout>();
 const isBroadcastingGitUpdates = new Set<string>();
 const DEBOUNCE_DELAY = 300; // Reduced from 1 second to 300ms for more responsive updates
-let defaultWorkspaceId: string | null = null;
+// Shared workspace selection across all connected sockets on this host.
 let activeWorkspaceId: string | null = null;
 
 const app = new Hono();
+const execFileAsync = promisify(execFile);
+
+function normalizeCommandOutput(value: unknown): string {
+	if (typeof value === 'string') {
+		return value;
+	}
+	if (Buffer.isBuffer(value)) {
+		return value.toString();
+	}
+	return '';
+}
 
 function listWorkspaceSummaries(): WorkspaceSummary[] {
 	return Array.from(workspacesById.values()).map((workspace) => ({
 		id: workspace.id,
 		path: workspace.rootPath,
-		isDefault: workspace.id === defaultWorkspaceId,
 		isWatching: workspace.watcher !== null,
 		isActive: workspace.id === activeWorkspaceId,
 	}));
@@ -115,13 +129,10 @@ function listWorkspaceSummaries(): WorkspaceSummary[] {
 function buildWorkspaceStatus(): WorkspaceStatus {
 	const workspaces = listWorkspaceSummaries();
 	const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) || null;
-	const defaultWorkspace = workspaces.find((workspace) => workspace.id === defaultWorkspaceId) || null;
 
 	return {
 		activeWorkspaceId,
-		defaultWorkspaceId,
 		activeWorkspace,
-		defaultWorkspace,
 		workspaces,
 	};
 }
@@ -149,6 +160,169 @@ function createWorkspaceId(rootPath: string): string {
 	}
 
 	return `${baseId}-${attempt}`;
+}
+
+async function runCommand(
+	command: string,
+	args: string[],
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	try {
+		const { stdout, stderr } = await execFileAsync(command, args, { encoding: 'utf8' });
+		return {
+			stdout: stdout.trim(),
+			stderr: stderr.trim(),
+			exitCode: 0,
+		};
+	} catch (error) {
+		const execError = error as ExecFileException & { stdout?: string | Buffer; stderr?: string | Buffer };
+		if (execError.code === 'ENOENT') {
+			throw error;
+		}
+
+		const stdout = normalizeCommandOutput(execError.stdout);
+		const stderr = normalizeCommandOutput(execError.stderr);
+		return {
+			stdout: stdout.trim(),
+			stderr: stderr.trim(),
+			exitCode: typeof execError.code === 'number' ? execError.code : -1,
+		};
+	}
+}
+
+function escapeAppleScriptString(value: string): string {
+	return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function escapePowerShellSingleQuoted(value: string): string {
+	return value.replace(/'/g, "''");
+}
+
+function resolveExistingDirectoryForPicker(inputPath?: string): string | undefined {
+	if (!inputPath || typeof inputPath !== 'string') {
+		return undefined;
+	}
+
+	try {
+		const resolvedPath = path.resolve(inputPath);
+		if (!fs.statSync(resolvedPath).isDirectory()) {
+			return undefined;
+		}
+
+		return fs.realpathSync(resolvedPath);
+	} catch {
+		return undefined;
+	}
+}
+
+async function chooseDirectoryOnDarwin(startPath?: string): Promise<DirectorySelectionResult> {
+	const defaultLocationClause = startPath
+		? ` default location POSIX file "${escapeAppleScriptString(startPath)}"`
+		: '';
+	const script = [
+		'try',
+		`set selectedFolder to choose folder with prompt "Select a workspace folder"${defaultLocationClause}`,
+		'return POSIX path of selectedFolder',
+		'on error number -128',
+		'return ""',
+		'end try',
+	].join('\n');
+
+	const result = await runCommand('osascript', ['-e', script]);
+	if (result.exitCode !== 0) {
+		throw new Error(result.stderr || 'Failed to open directory chooser');
+	}
+
+	if (!result.stdout) {
+		return { path: null, cancelled: true };
+	}
+
+	return { path: result.stdout, cancelled: false };
+}
+
+async function chooseDirectoryOnWindows(startPath?: string): Promise<DirectorySelectionResult> {
+	const selectedPathClause = startPath ? `$dialog.SelectedPath='${escapePowerShellSingleQuoted(startPath)}';` : '';
+	const script = [
+		'Add-Type -AssemblyName System.Windows.Forms;',
+		'$dialog = New-Object System.Windows.Forms.FolderBrowserDialog;',
+		selectedPathClause,
+		'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
+		'Write-Output $dialog.SelectedPath',
+		'}',
+	].join(' ');
+
+	const result = await runCommand('powershell', ['-NoProfile', '-Command', script]);
+	if (result.exitCode !== 0) {
+		throw new Error(result.stderr || 'Failed to open directory chooser');
+	}
+
+	if (!result.stdout) {
+		return { path: null, cancelled: true };
+	}
+
+	return { path: result.stdout, cancelled: false };
+}
+
+async function chooseDirectoryOnLinux(startPath?: string): Promise<DirectorySelectionResult> {
+	const zenityArgs = ['--file-selection', '--directory', '--title=Select workspace folder'];
+	if (startPath) {
+		const pathWithSeparator = startPath.endsWith(path.sep) ? startPath : `${startPath}${path.sep}`;
+		zenityArgs.push(`--filename=${pathWithSeparator}`);
+	}
+
+	try {
+		const result = await runCommand('zenity', zenityArgs);
+		if (result.exitCode === 0 && result.stdout) {
+			return { path: result.stdout, cancelled: false };
+		}
+		if (result.exitCode === 1) {
+			return { path: null, cancelled: true };
+		}
+	} catch (error) {
+		const errorCode = (error as NodeJS.ErrnoException).code;
+		if (errorCode !== 'ENOENT') {
+			throw error;
+		}
+	}
+
+	try {
+		const result = await runCommand('kdialog', [
+			'--getexistingdirectory',
+			startPath || os.homedir(),
+			'--title',
+			'Select workspace folder',
+		]);
+		if (result.exitCode === 0 && result.stdout) {
+			return { path: result.stdout, cancelled: false };
+		}
+		if (result.exitCode === 1) {
+			return { path: null, cancelled: true };
+		}
+	} catch (error) {
+		const errorCode = (error as NodeJS.ErrnoException).code;
+		if (errorCode !== 'ENOENT') {
+			throw error;
+		}
+	}
+
+	throw new Error('No supported directory chooser found (tried zenity and kdialog).');
+}
+
+async function chooseDirectory(startPath?: string): Promise<DirectorySelectionResult> {
+	const normalizedStartPath = resolveExistingDirectoryForPicker(startPath);
+
+	if (process.platform === 'darwin') {
+		return chooseDirectoryOnDarwin(normalizedStartPath);
+	}
+
+	if (process.platform === 'win32') {
+		return chooseDirectoryOnWindows(normalizedStartPath);
+	}
+
+	if (process.platform === 'linux') {
+		return chooseDirectoryOnLinux(normalizedStartPath);
+	}
+
+	throw new Error(`Directory chooser is not supported on platform "${process.platform}".`);
 }
 
 function ensurePath(input?: string): string {
@@ -328,10 +502,10 @@ async function startServer() {
 	});
 
 	try {
-		const defaultWorkspace = registerWorkspace(process.cwd(), false);
-		console.log(`📁 Default workspace: ${defaultWorkspace.rootPath} (${defaultWorkspace.id})`);
+		const initialWorkspace = registerWorkspace(process.cwd(), false);
+		console.log(`📁 Initial workspace: ${initialWorkspace.rootPath} (${initialWorkspace.id})`);
 	} catch (error) {
-		console.warn(`⚠️  Failed to initialize default workspace at ${process.cwd()}:`, error);
+		console.warn(`⚠️  Failed to initialize initial workspace at ${process.cwd()}:`, error);
 	}
 
 	/**
@@ -372,6 +546,20 @@ async function startServer() {
 		return timeout;
 	}
 
+	function emitWorkspaceStatusUpdate() {
+		const payload = {
+			success: true,
+			data: buildWorkspaceStatus(),
+		};
+
+		for (const socketId of authenticatedSockets.keys()) {
+			const connectedSocket = io.sockets.sockets.get(socketId);
+			if (connectedSocket) {
+				connectedSocket.emit('workspace:status:update', payload);
+			}
+		}
+	}
+
 	// Socket.IO event handlers
 	io.on('connection', (socket) => {
 		if (isDebugMode) {
@@ -396,7 +584,7 @@ async function startServer() {
 			};
 		}
 
-		const initialWorkspace = defaultWorkspaceId ? workspacesById.get(defaultWorkspaceId) || null : null;
+		const initialWorkspace = activeWorkspaceId ? workspacesById.get(activeWorkspaceId) || null : null;
 		if (initialWorkspace) {
 			subscribeSocketToWorkspace(socket, initialWorkspace);
 		}
@@ -409,12 +597,24 @@ async function startServer() {
 			if (!workspace) {
 				socket.emit(updateEvent, {
 					success: false,
-					error: 'Workspace is not initialized. Call workspace:init first.',
+					error: 'Workspace is not initialized. Call workspace:init or workspace:select first.',
 				});
 				return null;
 			}
 
 			return workspace;
+		}
+
+		function ensureAuthenticated(updateEvent: string): boolean {
+			if (authenticatedSockets.has(socket.id)) {
+				return true;
+			}
+
+			socket.emit(updateEvent, {
+				success: false,
+				error: 'Authentication required',
+			});
+			return false;
 		}
 
 		// Handle client authentication
@@ -484,98 +684,214 @@ async function startServer() {
 		});
 
 		// Initialize and select workspace
-			socket.on('workspace:init', (params: { path: string }) => {
-				try {
-					const workspace = registerWorkspace(params?.path, true);
-					subscribeSocketToWorkspace(socket, workspace);
+		socket.on('workspace:init', (params: { path: string }) => {
+			if (!ensureAuthenticated('workspace:init:update')) {
+				return;
+			}
+
+			try {
+				const workspace = registerWorkspace(params?.path, true);
+				subscribeSocketToWorkspace(socket, workspace);
 
 				socket.emit('workspace:init:update', {
 					success: true,
 					workspaceId: workspace.id,
 					path: workspace.rootPath,
+					data: buildWorkspaceStatus(),
 				});
+				emitWorkspaceStatusUpdate();
 			} catch (error) {
 				socket.emit('workspace:init:update', {
 					success: false,
 					error: error instanceof Error ? error.message : 'Failed to initialize workspace',
 				});
-				}
-			});
+			}
+		});
 
-			socket.on('workspace:status', () => {
-				socket.emit('workspace:status:update', {
+		socket.on('workspace:select', async (params: { startPath?: string } = {}) => {
+			if (!ensureAuthenticated('workspace:select:update')) {
+				return;
+			}
+
+			try {
+				const selection = await chooseDirectory(params?.startPath);
+				if (selection.cancelled || !selection.path) {
+					socket.emit('workspace:select:update', {
+						success: true,
+						cancelled: true,
+						data: buildWorkspaceStatus(),
+					});
+					return;
+				}
+
+				const workspace = registerWorkspace(selection.path, true);
+				subscribeSocketToWorkspace(socket, workspace);
+
+				socket.emit('workspace:select:update', {
 					success: true,
+					cancelled: false,
+					workspaceId: workspace.id,
+					path: workspace.rootPath,
 					data: buildWorkspaceStatus(),
 				});
-			});
+				emitWorkspaceStatusUpdate();
+			} catch (error) {
+				socket.emit('workspace:select:update', {
+					success: false,
+					error: error instanceof Error ? error.message : 'Failed to select workspace',
+				});
+			}
+		});
 
-			// Handle git status updates
-			socket.on('git:status', async (params: { workspaceId?: string } = {}) => {
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:status:update');
+		socket.on('workspace:remove', (params: { workspaceId?: string } = {}) => {
+			if (!ensureAuthenticated('workspace:remove:update')) {
+				return;
+			}
+
+			if (!params?.workspaceId || typeof params.workspaceId !== 'string') {
+				socket.emit('workspace:remove:update', {
+					success: false,
+					error: 'workspaceId is required',
+				});
+				return;
+			}
+
+			try {
+				unregisterWorkspace(params.workspaceId);
+				const fallbackWorkspace =
+					(activeWorkspaceId && workspacesById.get(activeWorkspaceId)) ||
+					Array.from(workspacesById.values())[0] ||
+					null;
+
+				for (const connectedSocket of io.sockets.sockets.values()) {
+					if (connectedSocket.data.workspaceId !== params.workspaceId) {
+						continue;
+					}
+
+					if (fallbackWorkspace) {
+						subscribeSocketToWorkspace(connectedSocket, fallbackWorkspace);
+						continue;
+					}
+
+					for (const workspace of workspacesById.values()) {
+						workspace.subscribers.delete(connectedSocket.id);
+					}
+					connectedSocket.data.workspaceId = null;
+				}
+
+				socket.emit('workspace:remove:update', {
+					success: true,
+					workspaceId: params.workspaceId,
+					data: buildWorkspaceStatus(),
+				});
+				emitWorkspaceStatusUpdate();
+			} catch (error) {
+				socket.emit('workspace:remove:update', {
+					success: false,
+					error: error instanceof Error ? error.message : 'Failed to remove workspace',
+				});
+			}
+		});
+
+		socket.on('workspace:status', () => {
+			socket.emit('workspace:status:update', {
+				success: true,
+				data: buildWorkspaceStatus(),
+			});
+		});
+
+		socket.on('workspace:activate', (params: { workspaceId?: string } = {}) => {
+			if (!ensureAuthenticated('workspace:activate:update')) {
+				return;
+			}
+
+			if (!params?.workspaceId || typeof params.workspaceId !== 'string') {
+				socket.emit('workspace:activate:update', {
+					success: false,
+					error: 'workspaceId is required',
+				});
+				return;
+			}
+
+			const workspace = workspacesById.get(params.workspaceId);
+			if (!workspace) {
+				socket.emit('workspace:activate:update', {
+					success: false,
+					error: 'Workspace not found',
+				});
+				return;
+			}
+
+			subscribeSocketToWorkspace(socket, workspace);
+			socket.emit('workspace:activate:update', {
+				success: true,
+				workspaceId: workspace.id,
+				path: workspace.rootPath,
+				data: buildWorkspaceStatus(),
+			});
+			emitWorkspaceStatusUpdate();
+		});
+
+		type WorkspaceParams = { workspaceId?: string };
+		type WorkspaceGitOperation = ReturnType<typeof createGitOperations>;
+
+		async function executeWorkspaceGitOperation(
+			params: WorkspaceParams | undefined,
+			updateEvent: string,
+			operationName: string,
+			operation: (gitOperations: WorkspaceGitOperation) => Promise<unknown>,
+			onSuccess?: (workspace: WorkspaceContext) => void,
+		): Promise<void> {
+			const workspace = resolveWorkspaceOrEmitError(params?.workspaceId, updateEvent);
 			if (!workspace) {
 				return;
 			}
 
 			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(workspaceGitOperations.status, 'get git status');
-			socket.emit('git:status:update', { workspaceId: workspace.id, ...result });
+			const result = await handleSocketGitOperation(() => operation(workspaceGitOperations), operationName);
+			if (result.success) {
+				onSuccess?.(workspace);
+			}
+
+			socket.emit(updateEvent, { workspaceId: workspace.id, ...result });
+		}
+
+		// Handle git status updates
+		socket.on('git:status', async (params: WorkspaceParams = {}) => {
+			await executeWorkspaceGitOperation(params, 'git:status:update', 'get git status', (gitOperations) =>
+				gitOperations.status(),
+			);
 		});
 
 		// Handle git branches
-		socket.on('git:branches', async (params: { workspaceId?: string } = {}) => {
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:branches:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(workspaceGitOperations.branches, 'get git branches');
-			socket.emit('git:branches:update', { workspaceId: workspace.id, ...result });
+		socket.on('git:branches', async (params: WorkspaceParams = {}) => {
+			await executeWorkspaceGitOperation(params, 'git:branches:update', 'get git branches', (gitOperations) =>
+				gitOperations.branches(),
+			);
 		});
 
 		// Handle git commits
 		socket.on(
 			'git:commits',
 			async (params: { branch?: string; from?: string; to?: string; workspaceId?: string }) => {
-				const workspace = resolveWorkspaceOrEmitError(params?.workspaceId, 'git:commits:update');
-				if (!workspace) {
-					return;
-				}
-
-				const workspaceGitOperations = createGitOperations(workspace.rootPath);
-				const result = await handleSocketGitOperation(
-					() => workspaceGitOperations.commits(params?.branch, params?.from, params?.to),
-					'get git commits',
+				await executeWorkspaceGitOperation(params, 'git:commits:update', 'get git commits', (gitOperations) =>
+					gitOperations.commits(params?.branch, params?.from, params?.to),
 				);
-				socket.emit('git:commits:update', { workspaceId: workspace.id, ...result });
 			},
 		);
 
 		// Handle git diff
 		socket.on('git:diff', async (params: { from?: string; to?: string; workspaceId?: string }) => {
-			const workspace = resolveWorkspaceOrEmitError(params?.workspaceId, 'git:diff:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.diff(params?.from, params?.to),
-				'get git diff',
+			await executeWorkspaceGitOperation(params, 'git:diff:update', 'get git diff', (gitOperations) =>
+				gitOperations.diff(params?.from, params?.to),
 			);
-			socket.emit('git:diff:update', { workspaceId: workspace.id, ...result });
 		});
 
 		// Handle git remotes
-		socket.on('git:remotes', async (params: { workspaceId?: string } = {}) => {
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:remotes:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(workspaceGitOperations.remotes, 'get git remotes');
-			socket.emit('git:remotes:update', { workspaceId: workspace.id, ...result });
+		socket.on('git:remotes', async (params: WorkspaceParams = {}) => {
+			await executeWorkspaceGitOperation(params, 'git:remotes:update', 'get git remotes', (gitOperations) =>
+				gitOperations.remotes(),
+			);
 		});
 
 		// Handle git remote
@@ -588,17 +904,9 @@ async function startServer() {
 				return;
 			}
 
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:remote:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.remote(params.remote),
-				'get git remote',
+			await executeWorkspaceGitOperation(params, 'git:remote:update', 'get git remote', (gitOperations) =>
+				gitOperations.remote(params.remote),
 			);
-			socket.emit('git:remote:update', { workspaceId: workspace.id, ...result });
 		});
 
 		// Handle git stage
@@ -613,22 +921,13 @@ async function startServer() {
 					return;
 				}
 
-				const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:stage:update');
-				if (!workspace) {
-					return;
-				}
-
-				const workspaceGitOperations = createGitOperations(workspace.rootPath);
-				const result = await handleSocketGitOperation(
-					() => workspaceGitOperations.stage([...params.files], params.areFilesUntracked),
+				await executeWorkspaceGitOperation(
+					params,
+					'git:stage:update',
 					'stage git files',
+					(gitOperations) => gitOperations.stage([...params.files], params.areFilesUntracked),
+					(workspace) => invalidateFileHashCache(workspace, params.files),
 				);
-
-				if (result.success) {
-					invalidateFileHashCache(workspace, params.files);
-				}
-
-				socket.emit('git:stage:update', { workspaceId: workspace.id, ...result });
 			},
 		);
 
@@ -642,22 +941,13 @@ async function startServer() {
 				return;
 			}
 
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:unstage:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.unstage(params.files),
+			await executeWorkspaceGitOperation(
+				params,
+				'git:unstage:update',
 				'unstage git files',
+				(gitOperations) => gitOperations.unstage(params.files),
+				(workspace) => invalidateFileHashCache(workspace, params.files),
 			);
-
-			if (result.success) {
-				invalidateFileHashCache(workspace, params.files);
-			}
-
-			socket.emit('git:unstage:update', { workspaceId: workspace.id, ...result });
 		});
 
 		// Handle git commit
@@ -670,22 +960,13 @@ async function startServer() {
 				return;
 			}
 
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:commit:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.commit(params.message),
+			await executeWorkspaceGitOperation(
+				params,
+				'git:commit:update',
 				'commit git changes',
+				(gitOperations) => gitOperations.commit(params.message),
+				(workspace) => invalidateFileHashCache(workspace),
 			);
-
-			if (result.success) {
-				invalidateFileHashCache(workspace);
-			}
-
-			socket.emit('git:commit:update', { workspaceId: workspace.id, ...result });
 		});
 
 		// Handle git push
@@ -698,17 +979,9 @@ async function startServer() {
 				return;
 			}
 
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:push:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.push(params.remote, params.branch),
-				'push git changes',
+			await executeWorkspaceGitOperation(params, 'git:push:update', 'push git changes', (gitOperations) =>
+				gitOperations.push(params.remote, params.branch),
 			);
-			socket.emit('git:push:update', { workspaceId: workspace.id, ...result });
 		});
 
 		// Handle git checkout
@@ -721,26 +994,20 @@ async function startServer() {
 				return;
 			}
 
-			const workspace = resolveWorkspaceOrEmitError(params.workspaceId, 'git:checkout:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.checkout(params.target, params.isFile || false),
+			await executeWorkspaceGitOperation(
+				params,
+				'git:checkout:update',
 				'checkout git branch',
-			);
+				(gitOperations) => gitOperations.checkout(params.target, params.isFile || false),
+				(workspace) => {
+					if (params.isFile) {
+						invalidateFileHashCache(workspace, [params.target]);
+						return;
+					}
 
-			if (result.success) {
-				if (params.isFile) {
-					invalidateFileHashCache(workspace, [params.target]);
-				} else {
 					invalidateFileHashCache(workspace);
-				}
-			}
-
-			socket.emit('git:checkout:update', { workspaceId: workspace.id, ...result });
+				},
+			);
 		});
 
 		// Handle git revParse
@@ -753,17 +1020,9 @@ async function startServer() {
 				return;
 			}
 
-			const workspace = resolveWorkspaceOrEmitError(params?.workspaceId, 'git:rev-parse:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.revParse(params.ref, params.remote),
-				'rev parse git ref',
+			await executeWorkspaceGitOperation(params, 'git:rev-parse:update', 'rev parse git ref', (gitOperations) =>
+				gitOperations.revParse(params.ref, params.remote),
 			);
-			socket.emit('git:rev-parse:update', { workspaceId: workspace.id, ...result });
 		});
 
 		// Handle git symbolicRef
@@ -776,17 +1035,12 @@ async function startServer() {
 				return;
 			}
 
-			const workspace = resolveWorkspaceOrEmitError(params?.workspaceId, 'git:symbolic-ref:update');
-			if (!workspace) {
-				return;
-			}
-
-			const workspaceGitOperations = createGitOperations(workspace.rootPath);
-			const result = await handleSocketGitOperation(
-				() => workspaceGitOperations.symbolicRef(params.remote, params.ref),
+			await executeWorkspaceGitOperation(
+				params,
+				'git:symbolic-ref:update',
 				'symbolic ref git remote',
+				(gitOperations) => gitOperations.symbolicRef(params.remote, params.ref),
 			);
-			socket.emit('git:symbolic-ref:update', { workspaceId: workspace.id, ...result });
 		});
 
 		// Handle file:get
@@ -977,11 +1231,6 @@ async function startServer() {
 	});
 
 	// Workspace and file watcher functionality
-	function isPathInside(rootPath: string, targetPath: string): boolean {
-		const relativePath = path.relative(rootPath, targetPath);
-		return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
-	}
-
 	function normalizeWorkspacePath(inputPath: string): string {
 		if (!inputPath || typeof inputPath !== 'string') {
 			throw new Error('Workspace path is required and must be a string');
@@ -1130,25 +1379,25 @@ async function startServer() {
 		workspace.fileHashes.clear();
 	}
 
-		function resolveWorkspaceForSocket(socket: Socket, workspaceId?: string): WorkspaceContext | null {
-			if (workspaceId) {
-				const explicitWorkspace = workspacesById.get(workspaceId);
-				if (!explicitWorkspace) {
-					return null;
-				}
-				if (!explicitWorkspace.subscribers.has(socket.id)) {
-					return null;
-				}
-				return explicitWorkspace;
-			}
-
-			const targetWorkspaceId = socket.data.workspaceId || defaultWorkspaceId;
-			if (!targetWorkspaceId) {
+	function resolveWorkspaceForSocket(socket: Socket, workspaceId?: string): WorkspaceContext | null {
+		if (workspaceId) {
+			const explicitWorkspace = workspacesById.get(workspaceId);
+			if (!explicitWorkspace) {
 				return null;
 			}
-
-			return workspacesById.get(targetWorkspaceId) || null;
+			if (!explicitWorkspace.subscribers.has(socket.id)) {
+				return null;
+			}
+			return explicitWorkspace;
 		}
+
+		const targetWorkspaceId = socket.data.workspaceId || activeWorkspaceId;
+		if (!targetWorkspaceId) {
+			return null;
+		}
+
+		return workspacesById.get(targetWorkspaceId) || null;
+	}
 
 	function registerWorkspace(inputPath: string, requireGitRepo: boolean = true): WorkspaceContext {
 		const normalizedPath = normalizeWorkspacePath(inputPath);
@@ -1179,14 +1428,44 @@ async function startServer() {
 		workspacesById.set(workspace.id, workspace);
 		workspaceIdByRootPath.set(normalizedPath, workspace.id);
 
-		if (!defaultWorkspaceId) {
-			defaultWorkspaceId = workspace.id;
-		}
 		if (!activeWorkspaceId) {
 			activeWorkspaceId = workspace.id;
 		}
 
 		setupWorkspaceWatcher(workspace);
+
+		return workspace;
+	}
+
+	function unregisterWorkspace(workspaceId: string): WorkspaceContext {
+		const workspace = workspacesById.get(workspaceId);
+		if (!workspace) {
+			throw new Error('Workspace not found');
+		}
+
+		const debounceTimeout = workspaceDebounceTimeouts.get(workspaceId);
+		if (debounceTimeout) {
+			clearTimeout(debounceTimeout);
+			workspaceDebounceTimeouts.delete(workspaceId);
+		}
+		isBroadcastingGitUpdates.delete(workspaceId);
+
+		if (workspace.watcher) {
+			workspace.watcher.close();
+			workspace.watcher = null;
+		}
+
+		workspace.fileHashes.clear();
+		workspace.subscribers.clear();
+
+		workspacesById.delete(workspaceId);
+		workspaceIdByRootPath.delete(workspace.rootPath);
+		releaseGitClient(workspace.rootPath);
+
+		const firstRemainingWorkspace = Array.from(workspacesById.values())[0] || null;
+		if (activeWorkspaceId === workspaceId) {
+			activeWorkspaceId = firstRemainingWorkspace ? firstRemainingWorkspace.id : null;
+		}
 
 		return workspace;
 	}
@@ -1321,7 +1600,13 @@ function cleanupWorkspaces() {
 		}
 		workspace.fileHashes.clear();
 		workspace.subscribers.clear();
+		releaseGitClient(workspace.rootPath);
 	}
+
+	workspacesById.clear();
+	workspaceIdByRootPath.clear();
+	isBroadcastingGitUpdates.clear();
+	activeWorkspaceId = null;
 }
 
 // Cleanup workspace watchers on process exit

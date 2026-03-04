@@ -9,8 +9,12 @@ export interface SocketGitResponse {
 
 const gitClientCache = new Map<string, SimpleGit>();
 
+function normalizeBaseDir(baseDir: string): string {
+	return path.resolve(baseDir);
+}
+
 function getGitClient(baseDir: string): SimpleGit {
-	const normalizedBaseDir = path.resolve(baseDir);
+	const normalizedBaseDir = normalizeBaseDir(baseDir);
 	const cachedClient = gitClientCache.get(normalizedBaseDir);
 	if (cachedClient) {
 		return cachedClient;
@@ -26,6 +30,14 @@ function getGitClient(baseDir: string): SimpleGit {
 	const gitClient = simpleGit(options);
 	gitClientCache.set(normalizedBaseDir, gitClient);
 	return gitClient;
+}
+
+export function releaseGitClient(baseDir: string): void {
+	gitClientCache.delete(normalizeBaseDir(baseDir));
+}
+
+export function clearGitClientCache(): void {
+	gitClientCache.clear();
 }
 
 /**
