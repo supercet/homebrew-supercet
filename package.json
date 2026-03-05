@@ -1,7 +1,7 @@
 {
 	"name": "homebrew-supercet",
 	"type": "module",
-	"version": "0.9.0",
+	"version": "0.10.0",
 	"scripts": {
 		"dev": "tsx watch src/index.ts",
 		"lint": "prettier --check .",
@@ -10,10 +10,11 @@
 		"bundle:arm64": "pkg dist/supercet.js --compress GZip --targets node22-macos-arm64 --output dist/bundle/supercet-arm64 --public-packages node-pty,better-sqlite3",
 		"bundle:x64": "pkg dist/supercet.js --compress GZip --targets node22-macos-x64 --output dist/bundle/supercet-x64 --public-packages node-pty,better-sqlite3",
 		"start": "node dist/supercet.js",
-		"local": "npm run build && npm run bundle:arm64",
+		"local": "npm run build && npm run bundle:arm64 && ./dist/bundle/supercet-arm64",
 		"tap:update": "ruby scripts/update-formula.rb",
 		"tap:test": "brew install --build-from-source ./Formula/supercet.rb",
-		"tap:uninstall": "brew uninstall supercet"
+		"tap:uninstall": "brew uninstall supercet",
+		"pretty": "prettier --write \"**/*.{js,ts,jsx,tsx}\""
 	},
 	"bin": {
 		"supercet": "dist/supercet.js"
