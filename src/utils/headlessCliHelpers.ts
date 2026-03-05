@@ -2,6 +2,16 @@ import { spawn } from 'child_process';
 import { Socket } from 'socket.io';
 import * as path from 'path';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
+import {
+	appendConduitSessionEvent,
+	createConduitSession,
+	findLatestConduitSessionIdByProviderSession,
+	getConduitWorkspaceById,
+	setConduitSessionProviderSessionId,
+	setConduitSessionStatus,
+	updateConduitSessionForRun,
+} from '../db/sqlite';
 
 export type SupportedCli = 'claude' | 'codex';
 
@@ -29,12 +39,19 @@ interface CliSessionOptions {
 interface SocketSessionPayload {
 	sessionId?: string;
 	prompt: string;
-	workingDir?: string;
+	context?: string;
 	cli?: SupportedCli;
 	model?: string;
+	agentId: string;
+	workspaceId: string;
+	pipelineId?: string;
 }
 
-export type WorkingDirResolver = string | (() => string);
+export interface ConduitSessionRequestMetadata {
+	agentId: string;
+	workspaceId: string;
+	pipelineId?: string;
+}
 
 // Maximum session timeout (10 minutes)
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
@@ -43,6 +60,137 @@ const CLI_PRECHECK_TIMEOUT_MS = 5000;
 // UUID pattern for matching and validating session IDs
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const cliAvailabilityCache = new Set<SupportedCli>();
+
+interface ConduitCaptureContext {
+	conduitSessionId: string;
+}
+
+function mapStreamEventRole(type: StreamEvent['type']): 'assistant' | 'event' {
+	if (type === 'stdout') {
+		return 'assistant';
+	}
+
+	return 'event';
+}
+
+export function validateConduitSessionRequestMetadata(metadata: ConduitSessionRequestMetadata): void {
+	if (!metadata.agentId || typeof metadata.agentId !== 'string') {
+		throw new Error('agentId is required and must be a string');
+	}
+
+	if (!isValidUUID(metadata.agentId)) {
+		throw new Error('Invalid agentId format (must be a valid UUID)');
+	}
+
+	if (!metadata.workspaceId || typeof metadata.workspaceId !== 'string') {
+		throw new Error('workspaceId is required and must be a string');
+	}
+
+	if (metadata.pipelineId !== undefined && metadata.pipelineId !== null) {
+		if (typeof metadata.pipelineId !== 'string') {
+			throw new Error('pipelineId must be a string');
+		}
+		if (!isValidUUID(metadata.pipelineId)) {
+			throw new Error('Invalid pipelineId format (must be a valid UUID)');
+		}
+	}
+}
+
+function startConduitSessionCapture(
+	cli: SupportedCli,
+	metadata: ConduitSessionRequestMetadata,
+	prompt: string,
+	model?: string,
+	providerSessionId?: string,
+	context?: string,
+): ConduitCaptureContext {
+	const existingConduitSessionId =
+		providerSessionId && isValidUUID(providerSessionId)
+			? findLatestConduitSessionIdByProviderSession(cli, providerSessionId)
+			: null;
+
+	const conduitSessionId = existingConduitSessionId || randomUUID();
+
+	if (existingConduitSessionId) {
+		updateConduitSessionForRun(conduitSessionId, {
+			providerSessionId: providerSessionId || null,
+			provider: cli,
+			agentId: metadata.agentId,
+			pipelineId: metadata.pipelineId || null,
+			workspaceId: metadata.workspaceId,
+			model: model || null,
+			status: 'running',
+		});
+	} else {
+		createConduitSession({
+			conduitSessionId,
+			providerSessionId: providerSessionId || null,
+			provider: cli,
+			agentId: metadata.agentId,
+			pipelineId: metadata.pipelineId || null,
+			workspaceId: metadata.workspaceId,
+			model: model || null,
+			status: 'running',
+		});
+	}
+
+	appendConduitSessionEvent(conduitSessionId, 'prompt', 'client', prompt);
+	if (context && context.trim()) {
+		appendConduitSessionEvent(conduitSessionId, 'context', 'client', context);
+	}
+	appendConduitSessionEvent(conduitSessionId, 'status', 'event', 'running');
+
+	return { conduitSessionId };
+}
+
+function captureConduitStreamEvent(captureContext: ConduitCaptureContext, streamData: StreamEvent): void {
+	if (streamData.type === 'sessionId' && isValidUUID(streamData.content)) {
+		setConduitSessionProviderSessionId(captureContext.conduitSessionId, streamData.content);
+	}
+
+	appendConduitSessionEvent(
+		captureContext.conduitSessionId,
+		streamData.type,
+		mapStreamEventRole(streamData.type),
+		streamData.content,
+	);
+}
+
+function completeConduitSessionCapture(captureContext: ConduitCaptureContext): void {
+	appendConduitSessionEvent(captureContext.conduitSessionId, 'status', 'event', 'completed');
+	setConduitSessionStatus(captureContext.conduitSessionId, 'completed');
+}
+
+function failConduitSessionCapture(captureContext: ConduitCaptureContext, errorMessage: string): void {
+	appendConduitSessionEvent(captureContext.conduitSessionId, 'status', 'event', 'error');
+	appendConduitSessionEvent(captureContext.conduitSessionId, 'error', 'event', errorMessage);
+	setConduitSessionStatus(captureContext.conduitSessionId, 'error');
+}
+
+export interface ConduitSessionCaptureHandle {
+	conduitSessionId: string;
+	handleStreamEvent: (streamData: StreamEvent) => void;
+	complete: () => void;
+	fail: (errorMessage: string) => void;
+}
+
+export function beginConduitSessionCapture(
+	cli: SupportedCli,
+	metadata: ConduitSessionRequestMetadata,
+	prompt: string,
+	model?: string,
+	providerSessionId?: string,
+	context?: string,
+): ConduitSessionCaptureHandle {
+	const captureContext = startConduitSessionCapture(cli, metadata, prompt, model, providerSessionId, context);
+
+	return {
+		conduitSessionId: captureContext.conduitSessionId,
+		handleStreamEvent: (streamData) => captureConduitStreamEvent(captureContext, streamData),
+		complete: () => completeConduitSessionCapture(captureContext),
+		fail: (errorMessage) => failConduitSessionCapture(captureContext, errorMessage),
+	};
+}
 
 export function isSupportedCli(value: unknown): value is SupportedCli {
 	return value === 'claude' || value === 'codex';
@@ -476,21 +624,17 @@ function resolveCli(value: unknown, fallback: SupportedCli): SupportedCli {
 
 export function handleHeadlessSessionCreate(
 	socket: Socket,
-	serverWorkingDir: WorkingDirResolver,
 	eventPrefix: string,
 	defaultCli: SupportedCli,
 ) {
 	socket.on(`${eventPrefix}:create`, async (data: SocketSessionPayload) => {
+		let captureContext: ConduitCaptureContext | null = null;
+
 		try {
-			const { prompt } = data;
+			const { prompt, context, agentId, workspaceId, pipelineId } = data;
 
 			if (!prompt || typeof prompt !== 'string') {
 				socket.emit(`${eventPrefix}:error`, { error: 'Prompt is required and must be a string' });
-				return;
-			}
-
-			if (data.workingDir !== undefined && typeof data.workingDir !== 'string') {
-				socket.emit(`${eventPrefix}:error`, { error: 'Working directory must be a string' });
 				return;
 			}
 
@@ -499,17 +643,55 @@ export function handleHeadlessSessionCreate(
 				return;
 			}
 
-			const cli = resolveCli(data.cli, defaultCli);
-			const resolvedServerWorkingDir =
-				typeof serverWorkingDir === 'function' ? serverWorkingDir() : serverWorkingDir;
-			const targetDir = data.workingDir || resolvedServerWorkingDir;
+			if (context !== undefined && typeof context !== 'string') {
+				socket.emit(`${eventPrefix}:error`, { error: 'Context must be a string' });
+				return;
+			}
 
-			socket.emit(`${eventPrefix}:started`, { message: `${cli} session starting...` });
+			validateConduitSessionRequestMetadata({ agentId, workspaceId, pipelineId });
+			const workspace = getConduitWorkspaceById(workspaceId);
+			if (!workspace) {
+				socket.emit(`${eventPrefix}:error`, { error: `Workspace '${workspaceId}' was not found` });
+				return;
+			}
+
+			const cli = resolveCli(data.cli, defaultCli);
+			const targetDir = workspace.path;
+			captureContext = startConduitSessionCapture(
+				cli,
+				{ agentId, workspaceId, pipelineId },
+				prompt,
+				data.model,
+				undefined,
+				context,
+			);
+
+			socket.emit(`${eventPrefix}:started`, {
+				message: `${cli} session starting...`,
+				conduitSessionId: captureContext.conduitSessionId,
+			});
 
 			await createHeadlessCliSession(cli, prompt, targetDir, data.model, (streamData) => {
 				emitSessionEvent(socket, eventPrefix, streamData);
+
+				if (captureContext) {
+					try {
+						captureConduitStreamEvent(captureContext, streamData);
+					} catch (error) {
+						console.error('Failed to persist conduit stream event:', error);
+					}
+				}
 			});
+
+			if (captureContext) {
+				completeConduitSessionCapture(captureContext);
+			}
 		} catch (error) {
+			if (captureContext) {
+				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+				failConduitSessionCapture(captureContext, errorMessage);
+			}
+
 			socket.emit(`${eventPrefix}:error`, {
 				error: error instanceof Error ? error.message : 'Unknown error occurred',
 			});
@@ -519,13 +701,14 @@ export function handleHeadlessSessionCreate(
 
 export function handleHeadlessSessionResume(
 	socket: Socket,
-	serverWorkingDir: WorkingDirResolver,
 	eventPrefix: string,
 	defaultCli: SupportedCli,
 ) {
 	socket.on(`${eventPrefix}:resume`, async (data: SocketSessionPayload) => {
+		let captureContext: ConduitCaptureContext | null = null;
+
 		try {
-			const { sessionId, prompt } = data;
+			const { sessionId, prompt, context, agentId, workspaceId, pipelineId } = data;
 
 			if (!sessionId || typeof sessionId !== 'string') {
 				socket.emit(`${eventPrefix}:error`, { error: 'Session ID is required and must be a string' });
@@ -542,27 +725,60 @@ export function handleHeadlessSessionResume(
 				return;
 			}
 
-			if (data.workingDir !== undefined && typeof data.workingDir !== 'string') {
-				socket.emit(`${eventPrefix}:error`, { error: 'Working directory must be a string' });
-				return;
-			}
-
 			if (data.model !== undefined && typeof data.model !== 'string') {
 				socket.emit(`${eventPrefix}:error`, { error: 'Model must be a string' });
 				return;
 			}
 
-			const cli = resolveCli(data.cli, defaultCli);
-			const resolvedServerWorkingDir =
-				typeof serverWorkingDir === 'function' ? serverWorkingDir() : serverWorkingDir;
-			const targetDir = data.workingDir || resolvedServerWorkingDir;
+			if (context !== undefined && typeof context !== 'string') {
+				socket.emit(`${eventPrefix}:error`, { error: 'Context must be a string' });
+				return;
+			}
 
-			socket.emit(`${eventPrefix}:started`, { message: `Resuming ${cli} session...` });
+			validateConduitSessionRequestMetadata({ agentId, workspaceId, pipelineId });
+			const workspace = getConduitWorkspaceById(workspaceId);
+			if (!workspace) {
+				socket.emit(`${eventPrefix}:error`, { error: `Workspace '${workspaceId}' was not found` });
+				return;
+			}
+
+			const cli = resolveCli(data.cli, defaultCli);
+			const targetDir = workspace.path;
+			captureContext = startConduitSessionCapture(
+				cli,
+				{ agentId, workspaceId, pipelineId },
+				prompt,
+				data.model,
+				sessionId,
+				context,
+			);
+
+			socket.emit(`${eventPrefix}:started`, {
+				message: `Resuming ${cli} session...`,
+				conduitSessionId: captureContext.conduitSessionId,
+			});
 
 			await resumeHeadlessCliSession(cli, sessionId, prompt, targetDir, data.model, (streamData) => {
 				emitSessionEvent(socket, eventPrefix, streamData);
+
+				if (captureContext) {
+					try {
+						captureConduitStreamEvent(captureContext, streamData);
+					} catch (error) {
+						console.error('Failed to persist conduit stream event:', error);
+					}
+				}
 			});
+
+			if (captureContext) {
+				completeConduitSessionCapture(captureContext);
+			}
 		} catch (error) {
+			if (captureContext) {
+				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+				failConduitSessionCapture(captureContext, errorMessage);
+			}
+
 			socket.emit(`${eventPrefix}:error`, {
 				error: error instanceof Error ? error.message : 'Unknown error occurred',
 			});

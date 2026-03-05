@@ -33,6 +33,19 @@ import { getSymbolicRef } from './git/symbolicRef';
 // Import file route handlers
 import { getFile } from './file/get';
 import { writeFile } from './file/write';
+import { getDbHealth } from './db/health';
+import { getConduitSession, getConduitSessions } from './db/sessions';
+import {
+	activateConduitWorkspace,
+	closeSQLite,
+	deactivateConduitWorkspaces,
+	initializeSQLite,
+	listConduitWorkspaces,
+	listConduitWorkspacesByMostRecentUpdate,
+	reconcileRunningConduitSessionsOnStartup,
+	removeConduitWorkspace,
+	upsertConduitWorkspace,
+} from './db/sqlite';
 
 // Import Claude Code route handlers
 import { createSession } from './claude/createSession';
@@ -459,6 +472,11 @@ app.get('/api/heartbeat', (c) => {
 	return c.json(null, 200);
 });
 
+// SQLite routes
+app.get('/api/db/health', getDbHealth);
+app.get('/api/conduit/sessions', getConduitSessions);
+app.get('/api/conduit/sessions/:conduitSessionId', getConduitSession);
+
 // Workspace routes
 app.get('/api/workspaces', (c) => {
 	const workspaces = listWorkspaceSummaries();
@@ -492,6 +510,48 @@ async function startServer() {
 		throw new Error(`Supercet is already running on port ${PORT}`);
 	}
 
+	const sqliteStatus = initializeSQLite();
+	console.log(`🗄️  SQLite initialized at ${sqliteStatus.dbPath}`);
+	const reconciliationResult = reconcileRunningConduitSessionsOnStartup();
+	if (reconciliationResult.cancelledCount > 0) {
+		console.warn(
+			`⚠️  Marked ${reconciliationResult.cancelledCount} stale running conduit session(s) as cancelled after restart`,
+		);
+	}
+
+	const persistedWorkspaces = listConduitWorkspaces();
+	const persistedActiveWorkspaceId = persistedWorkspaces.find((workspace) => workspace.isActive)?.id || null;
+	let hydratedWorkspaceCount = 0;
+	for (const persistedWorkspace of persistedWorkspaces) {
+		try {
+			const workspace = registerWorkspace(persistedWorkspace.path, true, persistedWorkspace.id);
+			persistWorkspaceRecord(workspace);
+			hydratedWorkspaceCount++;
+		} catch (error) {
+			console.warn(
+				`⚠️  Skipping persisted workspace ${persistedWorkspace.path} (${persistedWorkspace.id}):`,
+				error,
+			);
+		}
+	}
+
+	const initialWorkspace = registerWorkspace(process.cwd(), true);
+	persistWorkspaceRecord(initialWorkspace);
+
+	const restoredActiveWorkspace = persistedActiveWorkspaceId
+		? workspacesById.get(persistedActiveWorkspaceId) || null
+		: null;
+	const startupActiveWorkspace = restoredActiveWorkspace || initialWorkspace;
+	persistAndActivateWorkspace(startupActiveWorkspace);
+	activeWorkspaceId = startupActiveWorkspace.id;
+	console.log(`📁 Initial workspace: ${initialWorkspace.rootPath} (${initialWorkspace.id})`);
+	if (startupActiveWorkspace.id !== initialWorkspace.id) {
+		console.log(`📌 Restored active workspace: ${startupActiveWorkspace.rootPath} (${startupActiveWorkspace.id})`);
+	}
+	if (hydratedWorkspaceCount > 0) {
+		console.log(`📚 Hydrated ${hydratedWorkspaceCount} workspace(s) from SQLite`);
+	}
+
 	// Create HTTP server using Hono's serve function
 	const httpServer = serve({
 		fetch: app.fetch,
@@ -500,13 +560,6 @@ async function startServer() {
 	const io = new SocketIOServer(httpServer as HTTPServer, {
 		cors: corsConfig,
 	});
-
-	try {
-		const initialWorkspace = registerWorkspace(process.cwd(), false);
-		console.log(`📁 Initial workspace: ${initialWorkspace.rootPath} (${initialWorkspace.id})`);
-	} catch (error) {
-		console.warn(`⚠️  Failed to initialize initial workspace at ${process.cwd()}:`, error);
-	}
 
 	/**
 	 * Schedules a token refresh notification to be sent 3 seconds before the token expires.
@@ -560,6 +613,42 @@ async function startServer() {
 		}
 	}
 
+	function persistWorkspaceRecord(workspace: WorkspaceContext): void {
+		upsertConduitWorkspace(workspace.id, workspace.rootPath);
+	}
+
+	function persistAndActivateWorkspace(workspace: WorkspaceContext): void {
+		persistWorkspaceRecord(workspace);
+		activateConduitWorkspace(workspace.id);
+	}
+
+	function syncActiveWorkspaceRecord(): void {
+		if (!activeWorkspaceId) {
+			deactivateConduitWorkspaces();
+			return;
+		}
+
+		const activeWorkspace = workspacesById.get(activeWorkspaceId);
+		if (!activeWorkspace) {
+			deactivateConduitWorkspaces();
+			return;
+		}
+
+		persistAndActivateWorkspace(activeWorkspace);
+	}
+
+	function getMostRecentlyModifiedWorkspace(): WorkspaceContext | null {
+		const recentWorkspaces = listConduitWorkspacesByMostRecentUpdate();
+		for (const workspaceRecord of recentWorkspaces) {
+			const workspace = workspacesById.get(workspaceRecord.id);
+			if (workspace) {
+				return workspace;
+			}
+		}
+
+		return Array.from(workspacesById.values())[0] || null;
+	}
+
 	// Socket.IO event handlers
 	io.on('connection', (socket) => {
 		if (isDebugMode) {
@@ -570,7 +659,10 @@ async function startServer() {
 			const originalEmit = socket.emit.bind(socket);
 
 			// Log incoming messages
+			// Socket.IO's type definitions use `any[]` for event arguments, so we must match the signature here.
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			socket.on = function (event: string, listener: (...args: any[]) => void) {
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
 				return originalOn(event, (...args: any[]) => {
 					console.log(`📥 [${socket.id}] Received: ${event}`, args.length > 0 ? args : '');
 					return listener(...args);
@@ -578,6 +670,7 @@ async function startServer() {
 			};
 
 			// Log outgoing messages
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			socket.emit = function (event: string, ...args: any[]) {
 				console.log(`📤 [${socket.id}] Sent: ${event}`, args.length > 0 ? args : '');
 				return originalEmit(event, ...args);
@@ -691,6 +784,7 @@ async function startServer() {
 
 			try {
 				const workspace = registerWorkspace(params?.path, true);
+				persistAndActivateWorkspace(workspace);
 				subscribeSocketToWorkspace(socket, workspace);
 
 				socket.emit('workspace:init:update', {
@@ -725,6 +819,7 @@ async function startServer() {
 				}
 
 				const workspace = registerWorkspace(selection.path, true);
+				persistAndActivateWorkspace(workspace);
 				subscribeSocketToWorkspace(socket, workspace);
 
 				socket.emit('workspace:select:update', {
@@ -757,11 +852,24 @@ async function startServer() {
 			}
 
 			try {
+				// Remove from DB first so an FK violation (e.g. workspace has sessions)
+				// doesn't leave in-memory state inconsistent with the database.
+				removeConduitWorkspace(params.workspaceId);
+
+				const wasRemovingActiveWorkspace = activeWorkspaceId === params.workspaceId;
 				unregisterWorkspace(params.workspaceId);
-				const fallbackWorkspace =
-					(activeWorkspaceId && workspacesById.get(activeWorkspaceId)) ||
-					Array.from(workspacesById.values())[0] ||
-					null;
+
+				let fallbackWorkspace: WorkspaceContext | null;
+				if (wasRemovingActiveWorkspace) {
+					fallbackWorkspace = getMostRecentlyModifiedWorkspace();
+					activeWorkspaceId = fallbackWorkspace ? fallbackWorkspace.id : null;
+				} else {
+					fallbackWorkspace = (activeWorkspaceId && workspacesById.get(activeWorkspaceId)) || null;
+					if (!fallbackWorkspace) {
+						fallbackWorkspace = getMostRecentlyModifiedWorkspace();
+						activeWorkspaceId = fallbackWorkspace ? fallbackWorkspace.id : null;
+					}
+				}
 
 				for (const connectedSocket of io.sockets.sockets.values()) {
 					if (connectedSocket.data.workspaceId !== params.workspaceId) {
@@ -778,6 +886,8 @@ async function startServer() {
 					}
 					connectedSocket.data.workspaceId = null;
 				}
+
+				syncActiveWorkspaceRecord();
 
 				socket.emit('workspace:remove:update', {
 					success: true,
@@ -822,6 +932,7 @@ async function startServer() {
 				return;
 			}
 
+			persistAndActivateWorkspace(workspace);
 			subscribeSocketToWorkspace(socket, workspace);
 			socket.emit('workspace:activate:update', {
 				success: true,
@@ -1094,10 +1205,10 @@ async function startServer() {
 		});
 
 		// Handle Claude Code session creation and resumption
-		handleClaudeSessionCreate(socket, () => resolveWorkspaceForSocket(socket)?.rootPath || process.cwd());
-		handleClaudeSessionResume(socket, () => resolveWorkspaceForSocket(socket)?.rootPath || process.cwd());
-		handleCodexSessionCreate(socket, () => resolveWorkspaceForSocket(socket)?.rootPath || process.cwd());
-		handleCodexSessionResume(socket, () => resolveWorkspaceForSocket(socket)?.rootPath || process.cwd());
+		handleClaudeSessionCreate(socket);
+		handleClaudeSessionResume(socket);
+		handleCodexSessionCreate(socket);
+		handleCodexSessionResume(socket);
 
 		let ptyProcess: ReturnType<typeof spawnLoginShell> | null = null;
 
@@ -1399,7 +1510,11 @@ async function startServer() {
 		return workspacesById.get(targetWorkspaceId) || null;
 	}
 
-	function registerWorkspace(inputPath: string, requireGitRepo: boolean = true): WorkspaceContext {
+	function registerWorkspace(
+		inputPath: string,
+		requireGitRepo: boolean = true,
+		preferredId?: string,
+	): WorkspaceContext {
 		const normalizedPath = normalizeWorkspacePath(inputPath);
 		const existingWorkspaceId = workspaceIdByRootPath.get(normalizedPath);
 		if (existingWorkspaceId) {
@@ -1416,8 +1531,16 @@ async function startServer() {
 			throw new Error('Workspace must be a git repository. Run `git init` in that directory first.');
 		}
 
+		let workspaceId = createWorkspaceId(normalizedPath);
+		if (preferredId) {
+			const existingByPreferredId = workspacesById.get(preferredId);
+			if (!existingByPreferredId || existingByPreferredId.rootPath === normalizedPath) {
+				workspaceId = preferredId;
+			}
+		}
+
 		const workspace: WorkspaceContext = {
-			id: createWorkspaceId(normalizedPath),
+			id: workspaceId,
 			rootPath: normalizedPath,
 			watcher: null,
 			gitignorePatterns: [],
@@ -1461,11 +1584,6 @@ async function startServer() {
 		workspacesById.delete(workspaceId);
 		workspaceIdByRootPath.delete(workspace.rootPath);
 		releaseGitClient(workspace.rootPath);
-
-		const firstRemainingWorkspace = Array.from(workspacesById.values())[0] || null;
-		if (activeWorkspaceId === workspaceId) {
-			activeWorkspaceId = firstRemainingWorkspace ? firstRemainingWorkspace.id : null;
-		}
 
 		return workspace;
 	}
@@ -1607,6 +1725,7 @@ function cleanupWorkspaces() {
 	workspaceIdByRootPath.clear();
 	isBroadcastingGitUpdates.clear();
 	activeWorkspaceId = null;
+	closeSQLite();
 }
 
 // Cleanup workspace watchers on process exit
