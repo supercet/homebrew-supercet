@@ -622,11 +622,7 @@ function resolveCli(value: unknown, fallback: SupportedCli): SupportedCli {
 	return value;
 }
 
-export function handleHeadlessSessionCreate(
-	socket: Socket,
-	eventPrefix: string,
-	defaultCli: SupportedCli,
-) {
+export function handleHeadlessSessionCreate(socket: Socket, eventPrefix: string, defaultCli: SupportedCli) {
 	socket.on(`${eventPrefix}:create`, async (data: SocketSessionPayload) => {
 		let captureContext: ConduitCaptureContext | null = null;
 
@@ -699,11 +695,7 @@ export function handleHeadlessSessionCreate(
 	});
 }
 
-export function handleHeadlessSessionResume(
-	socket: Socket,
-	eventPrefix: string,
-	defaultCli: SupportedCli,
-) {
+export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string, defaultCli: SupportedCli) {
 	socket.on(`${eventPrefix}:resume`, async (data: SocketSessionPayload) => {
 		let captureContext: ConduitCaptureContext | null = null;
 

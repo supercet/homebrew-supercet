@@ -522,7 +522,24 @@ async function startServer() {
 	const persistedWorkspaces = listConduitWorkspaces();
 	const persistedActiveWorkspaceId = persistedWorkspaces.find((workspace) => workspace.isActive)?.id || null;
 	let hydratedWorkspaceCount = 0;
+	let prunedWorkspaceCount = 0;
 	for (const persistedWorkspace of persistedWorkspaces) {
+		if (!doesWorkspaceDirectoryExist(persistedWorkspace.path)) {
+			try {
+				removeConduitWorkspace(persistedWorkspace.id);
+				prunedWorkspaceCount++;
+				console.warn(
+					`🧹 Pruned persisted workspace ${persistedWorkspace.path} (${persistedWorkspace.id}) because the directory does not exist`,
+				);
+			} catch (error) {
+				console.warn(
+					`⚠️  Failed to prune missing persisted workspace ${persistedWorkspace.path} (${persistedWorkspace.id}):`,
+					error,
+				);
+			}
+			continue;
+		}
+
 		try {
 			const workspace = registerWorkspace(persistedWorkspace.path, true, persistedWorkspace.id);
 			persistWorkspaceRecord(workspace);
@@ -550,6 +567,9 @@ async function startServer() {
 	}
 	if (hydratedWorkspaceCount > 0) {
 		console.log(`📚 Hydrated ${hydratedWorkspaceCount} workspace(s) from SQLite`);
+	}
+	if (prunedWorkspaceCount > 0) {
+		console.log(`🧹 Pruned ${prunedWorkspaceCount} missing workspace(s) from SQLite`);
 	}
 
 	// Create HTTP server using Hono's serve function
@@ -1354,6 +1374,19 @@ async function startServer() {
 		}
 
 		return fs.realpathSync(resolvedPath);
+	}
+
+	function doesWorkspaceDirectoryExist(inputPath: string): boolean {
+		if (!inputPath || typeof inputPath !== 'string') {
+			return false;
+		}
+
+		try {
+			const resolvedPath = path.resolve(inputPath);
+			return fs.statSync(resolvedPath).isDirectory();
+		} catch {
+			return false;
+		}
 	}
 
 	function isGitRepository(dir: string): boolean {
