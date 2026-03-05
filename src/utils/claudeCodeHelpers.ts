@@ -6,7 +6,6 @@ import {
 	HeadlessCliSession,
 	isValidUUID,
 	resumeHeadlessCliSession,
-	WorkingDirResolver,
 } from './headlessCliHelpers';
 
 export { isValidUUID };
@@ -36,12 +35,12 @@ export async function resumeClaudeCodeSession(
 	return resumeHeadlessCliSession('claude', sessionId, prompt, workingDir, model, streamCallback);
 }
 
-export function handleClaudeSessionCreate(socket: Socket, workingDir: WorkingDirResolver) {
-	handleHeadlessSessionCreate(socket, workingDir, 'claude:session', 'claude');
+export function handleClaudeSessionCreate(socket: Socket) {
+	handleHeadlessSessionCreate(socket, 'claude:session', 'claude');
 }
 
-export function handleClaudeSessionResume(socket: Socket, workingDir: WorkingDirResolver) {
-	handleHeadlessSessionResume(socket, workingDir, 'claude:session', 'claude');
+export function handleClaudeSessionResume(socket: Socket) {
+	handleHeadlessSessionResume(socket, 'claude:session', 'claude');
 }
 
 export async function createCodexSession(
@@ -69,10 +68,10 @@ export async function resumeCodexSession(
 	return resumeHeadlessCliSession('codex', sessionId, prompt, workingDir, model, streamCallback);
 }
 
-export function handleCodexSessionCreate(socket: Socket, workingDir: WorkingDirResolver) {
-	handleHeadlessSessionCreate(socket, workingDir, 'codex:session', 'codex');
+export function handleCodexSessionCreate(socket: Socket) {
+	handleHeadlessSessionCreate(socket, 'codex:session', 'codex');
 }
 
-export function handleCodexSessionResume(socket: Socket, workingDir: WorkingDirResolver) {
-	handleHeadlessSessionResume(socket, workingDir, 'codex:session', 'codex');
+export function handleCodexSessionResume(socket: Socket) {
+	handleHeadlessSessionResume(socket, 'codex:session', 'codex');
 }
