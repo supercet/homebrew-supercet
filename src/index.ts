@@ -4,7 +4,7 @@ import { cors } from 'hono/cors';
 import { ContentfulStatusCode } from 'hono/utils/http-status';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import type { Server as HTTPServer } from 'node:http';
-import { execFile, type ExecFileException } from 'node:child_process';
+import { execFile, spawn, type ExecFileException } from 'node:child_process';
 import pty from 'node-pty';
 import os from 'os';
 import fs from 'fs';
@@ -119,6 +119,7 @@ let activeWorkspaceId: string | null = null;
 
 const app = new Hono();
 const execFileAsync = promisify(execFile);
+let hasEnsuredNodePtySpawnHelperExecutable = false;
 
 function normalizeCommandOutput(value: unknown): string {
 	if (typeof value === 'string') {
@@ -344,19 +345,112 @@ function ensurePath(input?: string): string {
 	return Array.from(parts).join(':');
 }
 
-function pickShell(): string {
-	const candidates = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter(Boolean) as string[];
-	return candidates.find((shell) => shell.startsWith('/') && fs.existsSync(shell)) || '/bin/sh';
+function listNodePtySpawnHelperCandidates(): string[] {
+	let unixTerminalPath: string;
+	try {
+		unixTerminalPath = require.resolve('node-pty/lib/unixTerminal');
+	} catch {
+		return [];
+	}
+
+	const unixTerminalDirectory = path.dirname(unixTerminalPath);
+	const helperRelatives = [
+		'../build/Release/spawn-helper',
+		'../build/Debug/spawn-helper',
+		`../prebuilds/${process.platform}-${process.arch}/spawn-helper`,
+	];
+	const helperPaths = new Set<string>();
+
+	for (const relativePath of helperRelatives) {
+		const resolvedPath = path.resolve(unixTerminalDirectory, relativePath);
+		helperPaths.add(resolvedPath);
+		helperPaths.add(resolvedPath.replace('app.asar', 'app.asar.unpacked'));
+		helperPaths.add(resolvedPath.replace('node_modules.asar', 'node_modules.asar.unpacked'));
+	}
+
+	return Array.from(helperPaths);
 }
 
-function pickCwd(): string {
-	const candidates = [process.cwd(), process.env.HOME, os.homedir?.(), '/tmp', '/'].filter(Boolean) as string[];
+function ensureNodePtySpawnHelperExecutable(): void {
+	if (hasEnsuredNodePtySpawnHelperExecutable || process.platform === 'win32') {
+		return;
+	}
+	hasEnsuredNodePtySpawnHelperExecutable = true;
+
+	const helperPaths = listNodePtySpawnHelperCandidates();
+	for (const helperPath of helperPaths) {
+		try {
+			const stats = fs.statSync(helperPath);
+			if (!stats.isFile()) {
+				continue;
+			}
+
+			if ((stats.mode & 0o111) !== 0) {
+				return;
+			}
+
+			fs.chmodSync(helperPath, stats.mode | 0o111);
+			return;
+		} catch {
+			continue;
+		}
+	}
+}
+
+function getCurrentWorkingDirectory(): string | undefined {
+	try {
+		return process.cwd();
+	} catch {
+		return undefined;
+	}
+}
+
+function listShellCandidates(): string[] {
+	const candidates = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter(
+		(candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
+	);
+	const executableShells = new Set<string>();
+	for (const shell of candidates) {
+		if (!shell.startsWith('/')) {
+			continue;
+		}
+
+		try {
+			fs.accessSync(shell, fs.constants.X_OK);
+			executableShells.add(shell);
+		} catch {
+			continue;
+		}
+	}
+
+	return Array.from(executableShells);
+}
+
+function listCwdCandidates(preferredCwd?: string): string[] {
+	const candidates = [
+		preferredCwd,
+		getCurrentWorkingDirectory(),
+		process.env.HOME,
+		os.homedir?.(),
+		'/tmp',
+		'/',
+	].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
+	const usableDirectories = new Set<string>();
 	for (const dir of candidates) {
 		try {
-			if (fs.statSync(dir).isDirectory()) return dir;
-		} catch {}
+			if (fs.statSync(dir).isDirectory()) {
+				usableDirectories.add(dir);
+			}
+		} catch {
+			continue;
+		}
 	}
-	return '/';
+
+	if (usableDirectories.size === 0) {
+		usableDirectories.add('/');
+	}
+
+	return Array.from(usableDirectories);
 }
 
 function buildEnv(): NodeJS.ProcessEnv {
@@ -383,22 +477,152 @@ function shellArgsFor(file: string): string[] {
 	return []; // safe default
 }
 
-export function spawnLoginShell(cols = 80, rows = 24) {
-	const file = pickShell();
-	const cwd = pickCwd();
-	const env = buildEnv();
+function stringifyError(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
 
-	// Verify shell is executable
-	fs.accessSync(file, fs.constants.X_OK);
+	return String(error);
+}
 
-	const p = pty.spawn(file, shellArgsFor(file), {
-		name: 'xterm-256color',
-		cols,
-		rows,
+interface TerminalInitParams {
+	cols?: number;
+	rows?: number;
+	workspaceId?: string;
+}
+
+interface SpawnLoginShellOptions {
+	cols?: number;
+	rows?: number;
+	preferredCwd?: string;
+}
+
+type TerminalHandle = Pick<ReturnType<typeof pty.spawn>, 'onData' | 'write' | 'resize' | 'kill'>;
+
+function destroyStreamSafely(stream: NodeJS.ReadWriteStream): void {
+	if ('destroy' in stream && typeof stream.destroy === 'function') {
+		stream.destroy();
+	}
+}
+
+function spawnShellViaOpenPty(
+	shellFile: string,
+	shellArgs: string[],
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+	cols: number,
+	rows: number,
+): TerminalHandle {
+	type OpenPtyFn = (options: { cols?: number; rows?: number; encoding?: string | null }) => {
+		master: NodeJS.ReadWriteStream;
+		slave: NodeJS.ReadWriteStream;
+		resize?: (columns: number, rows: number) => void;
+	};
+	const open = (pty as unknown as { open?: OpenPtyFn }).open;
+	if (typeof open !== 'function') {
+		throw new Error('node-pty open() fallback is unavailable.');
+	}
+
+	const openPty = open({ cols, rows, encoding: 'utf8' });
+	const master = openPty.master;
+	const slave = openPty.slave;
+	if (!master || !slave) {
+		throw new Error('node-pty open() did not return master/slave streams.');
+	}
+
+	const child = spawn(shellFile, shellArgs, {
 		cwd,
 		env,
+		stdio: [slave, slave, slave],
 	});
-	return p;
+
+	child.on('exit', () => {
+		destroyStreamSafely(master);
+		destroyStreamSafely(slave);
+	});
+
+	return {
+		onData(listener) {
+			const onChunk = (chunk: string | Buffer) => {
+				listener(typeof chunk === 'string' ? chunk : chunk.toString());
+			};
+			master.on('data', onChunk);
+			return {
+				dispose: () => {
+					if ('off' in master && typeof master.off === 'function') {
+						master.off('data', onChunk);
+						return;
+					}
+					master.removeListener('data', onChunk);
+				},
+			};
+		},
+		write(data) {
+			if (child.exitCode !== null || child.killed) {
+				return;
+			}
+			master.write(data);
+		},
+		resize(columns, nextRows) {
+			if (typeof openPty.resize === 'function') {
+				openPty.resize(columns, nextRows);
+			}
+		},
+		kill() {
+			if (child.exitCode === null && !child.killed) {
+				child.kill('SIGHUP');
+			}
+			destroyStreamSafely(master);
+			destroyStreamSafely(slave);
+		},
+	};
+}
+
+export function spawnLoginShell({ cols = 80, rows = 24, preferredCwd }: SpawnLoginShellOptions = {}): TerminalHandle {
+	ensureNodePtySpawnHelperExecutable();
+
+	const shellCandidates = listShellCandidates();
+	if (shellCandidates.length === 0) {
+		throw new Error('No executable shell is available for terminal initialization.');
+	}
+
+	const cwdCandidates = listCwdCandidates(preferredCwd);
+	const env = buildEnv();
+	const errors: string[] = [];
+	const fallbackErrors: string[] = [];
+
+	for (const shellFile of shellCandidates) {
+		for (const cwd of cwdCandidates) {
+			try {
+				return pty.spawn(shellFile, shellArgsFor(shellFile), {
+					name: 'xterm-256color',
+					cols,
+					rows,
+					cwd,
+					env,
+				});
+			} catch (error) {
+				errors.push(`shell=${shellFile}, cwd=${cwd}: ${stringifyError(error)}`);
+			}
+		}
+	}
+
+	for (const shellFile of shellCandidates) {
+		const shellArgs = shellArgsFor(shellFile);
+		for (const cwd of cwdCandidates) {
+			try {
+				return spawnShellViaOpenPty(shellFile, shellArgs, cwd, env, cols, rows);
+			} catch (error) {
+				fallbackErrors.push(`shell=${shellFile}, cwd=${cwd}: ${stringifyError(error)}`);
+			}
+		}
+	}
+
+	const formattedErrors = errors.slice(0, 3).join(' | ');
+	const formattedFallbackErrors = fallbackErrors.slice(0, 2).join(' | ');
+	throw new Error(
+		`Unable to initialize terminal shell. primary=${formattedErrors}${formattedFallbackErrors ? ` | fallback=${formattedFallbackErrors}` : ''}`,
+	);
 }
 
 // CORS middleware - allow requests from specified origins
@@ -1233,7 +1457,31 @@ async function startServer() {
 		let ptyProcess: ReturnType<typeof spawnLoginShell> | null = null;
 
 		// Handle terminal initialization
-		socket.on('terminal:init', ({ cols = 80, rows = 24 }: { cols?: number; rows?: number } = {}) => {
+		socket.on('terminal:init', (params: TerminalInitParams = {}) => {
+			if (!ensureAuthenticated('terminal:init:update')) {
+				return;
+			}
+
+			const requestedCols = params.cols;
+			const requestedRows = params.rows;
+			const cols =
+				typeof requestedCols === 'number' && Number.isInteger(requestedCols) && requestedCols > 0
+					? Math.min(requestedCols, 500)
+					: 80;
+			const rows =
+				typeof requestedRows === 'number' && Number.isInteger(requestedRows) && requestedRows > 0
+					? Math.min(requestedRows, 500)
+					: 24;
+			const hasExplicitWorkspace = typeof params.workspaceId === 'string' && params.workspaceId.length > 0;
+			const workspace = resolveWorkspaceForSocket(socket, hasExplicitWorkspace ? params.workspaceId : undefined);
+			if (hasExplicitWorkspace && !workspace) {
+				socket.emit('terminal:init:update', {
+					success: false,
+					error: 'Workspace is not initialized or not subscribed for this socket. Call workspace:init, workspace:select, or workspace:activate first.',
+				});
+				return;
+			}
+
 			// Allow reinitializing after termination by removing the existing check
 			if (ptyProcess) {
 				// Clean up existing terminal first
@@ -1246,7 +1494,11 @@ async function startServer() {
 			}
 
 			try {
-				ptyProcess = spawnLoginShell(cols, rows);
+				ptyProcess = spawnLoginShell({
+					cols,
+					rows,
+					preferredCwd: workspace?.rootPath,
+				});
 
 				// Server -> Client: stream data
 				ptyProcess.onData((data) => {
@@ -1267,6 +1519,10 @@ async function startServer() {
 
 		// Handle terminal termination
 		socket.on('terminal:terminate', () => {
+			if (!ensureAuthenticated('terminal:terminate:update')) {
+				return;
+			}
+
 			if (!ptyProcess) {
 				socket.emit('terminal:terminate:update', {
 					success: false,
@@ -1292,7 +1548,19 @@ async function startServer() {
 		});
 
 		// Client -> Server: user input
-		socket.on('terminal:input', (data: string) => {
+		socket.on('terminal:input', (data: unknown) => {
+			if (!ensureAuthenticated('terminal:input:update')) {
+				return;
+			}
+
+			if (typeof data !== 'string') {
+				socket.emit('terminal:input:update', {
+					success: false,
+					error: 'Terminal input must be a string.',
+				});
+				return;
+			}
+
 			if (!ptyProcess) {
 				socket.emit('terminal:input:update', {
 					success: false,
@@ -1304,7 +1572,11 @@ async function startServer() {
 		});
 
 		// Resize from client
-		socket.on('terminal:resize', ({ cols, rows }: { cols: number; rows: number }) => {
+		socket.on('terminal:resize', (params: { cols?: number; rows?: number } = {}) => {
+			if (!ensureAuthenticated('terminal:resize:update')) {
+				return;
+			}
+
 			if (!ptyProcess) {
 				socket.emit('terminal:resize:update', {
 					success: false,
@@ -1312,10 +1584,18 @@ async function startServer() {
 				});
 				return;
 			}
+			const cols =
+				typeof params.cols === 'number' && Number.isInteger(params.cols) && params.cols > 0
+					? Math.min(params.cols, 500)
+					: undefined;
+			const rows =
+				typeof params.rows === 'number' && Number.isInteger(params.rows) && params.rows > 0
+					? Math.min(params.rows, 500)
+					: undefined;
 			if (!cols || !rows) {
 				socket.emit('terminal:resize:update', {
 					success: false,
-					error: 'Invalid dimensions. Both cols and rows must be provided.',
+					error: 'Invalid dimensions. Both cols and rows must be positive integers.',
 				});
 				return;
 			}
