@@ -37,13 +37,17 @@ import { getDbHealth } from './db/health';
 import { getConduitSession, getConduitSessions } from './db/sessions';
 import {
 	activateConduitWorkspace,
+	appendConduitWorkspaceEvent,
 	closeSQLite,
+	conduitWorkspaceIdExists,
 	deactivateConduitWorkspaces,
+	getConduitWorkspaceById,
 	initializeSQLite,
-	listConduitWorkspaces,
+	listReadyConduitWorkspaces,
 	listConduitWorkspacesByMostRecentUpdate,
 	reconcileRunningConduitSessionsOnStartup,
 	removeConduitWorkspace,
+	setConduitWorkspaceLifecycleState,
 	upsertConduitWorkspace,
 } from './db/sqlite';
 
@@ -58,6 +62,7 @@ import {
 	handleCodexSessionCreate,
 	handleCodexSessionResume,
 } from './utils/claudeCodeHelpers';
+import { registerWorktreeSocketHandlers } from './workspace/worktreeSocketHandlers';
 
 const PORT = 4444;
 const HOST = process.env.SUPERCET_URL || 'https://supercet.com';
@@ -82,6 +87,9 @@ interface AuthenticatedSocket {
 interface WorkspaceContext {
 	id: string;
 	rootPath: string;
+	repoRootPath: string;
+	branchName: string | null;
+	parentWorkspaceId: string | null;
 	watcher: fs.FSWatcher | null;
 	gitignorePatterns: string[];
 	fileHashes: Map<string, string>;
@@ -91,6 +99,10 @@ interface WorkspaceContext {
 interface WorkspaceSummary {
 	id: string;
 	path: string;
+	repoRootPath: string;
+	branchName: string | null;
+	parentWorkspaceId: string | null;
+	isWorktree: boolean;
 	isWatching: boolean;
 	isActive: boolean;
 }
@@ -135,6 +147,10 @@ function listWorkspaceSummaries(): WorkspaceSummary[] {
 	return Array.from(workspacesById.values()).map((workspace) => ({
 		id: workspace.id,
 		path: workspace.rootPath,
+		repoRootPath: workspace.repoRootPath,
+		branchName: workspace.branchName,
+		parentWorkspaceId: workspace.parentWorkspaceId,
+		isWorktree: workspace.parentWorkspaceId !== null,
 		isWatching: workspace.watcher !== null,
 		isActive: workspace.id === activeWorkspaceId,
 	}));
@@ -163,17 +179,34 @@ function slugifyWorkspaceName(name: string): string {
 function createWorkspaceId(rootPath: string): string {
 	const baseName = path.basename(rootPath) || 'workspace';
 	const baseId = slugifyWorkspaceName(baseName);
+	const isWorkspaceIdAvailable = (candidateWorkspaceId: string) =>
+		!workspacesById.has(candidateWorkspaceId) && !conduitWorkspaceIdExists(candidateWorkspaceId);
 
-	if (!workspacesById.has(baseId)) {
+	if (isWorkspaceIdAvailable(baseId)) {
 		return baseId;
 	}
 
 	let attempt = 2;
-	while (workspacesById.has(`${baseId}-${attempt}`)) {
+	while (!isWorkspaceIdAvailable(`${baseId}-${attempt}`)) {
 		attempt++;
 	}
 
 	return `${baseId}-${attempt}`;
+}
+
+async function resolveWorkspaceGitMetadata(
+	workspacePath: string,
+): Promise<{ repoRootPath: string; branchName: string | null }> {
+	const gitOperations = createGitOperations(workspacePath);
+	const [repoRootPath, branchName] = await Promise.all([gitOperations.repoRoot(), gitOperations.currentBranch()]);
+	return {
+		repoRootPath,
+		branchName,
+	};
+}
+
+function isWorkspaceWorktree(workspace: WorkspaceContext): boolean {
+	return workspace.parentWorkspaceId !== null;
 }
 
 async function runCommand(
@@ -743,14 +776,32 @@ async function startServer() {
 		);
 	}
 
-	const persistedWorkspaces = listConduitWorkspaces();
+	const persistedWorkspaces = listReadyConduitWorkspaces();
 	const persistedActiveWorkspaceId = persistedWorkspaces.find((workspace) => workspace.isActive)?.id || null;
 	let hydratedWorkspaceCount = 0;
 	let prunedWorkspaceCount = 0;
 	for (const persistedWorkspace of persistedWorkspaces) {
 		if (!doesWorkspaceDirectoryExist(persistedWorkspace.path)) {
 			try {
-				removeConduitWorkspace(persistedWorkspace.id);
+				if (persistedWorkspace.isWorktree) {
+					setConduitWorkspaceLifecycleState(persistedWorkspace.id, 'completed');
+					appendConduitWorkspaceEvent(
+						persistedWorkspace.id,
+						'completed',
+						'Auto-completed on startup because worktree path was missing.',
+					);
+				} else {
+					try {
+						removeConduitWorkspace(persistedWorkspace.id);
+					} catch {
+						setConduitWorkspaceLifecycleState(persistedWorkspace.id, 'completed');
+						appendConduitWorkspaceEvent(
+							persistedWorkspace.id,
+							'completed',
+							'Auto-completed on startup because workspace path was missing and record could not be deleted.',
+						);
+					}
+				}
 				prunedWorkspaceCount++;
 				console.warn(
 					`🧹 Pruned persisted workspace ${persistedWorkspace.path} (${persistedWorkspace.id}) because the directory does not exist`,
@@ -765,8 +816,16 @@ async function startServer() {
 		}
 
 		try {
-			const workspace = registerWorkspace(persistedWorkspace.path, true, persistedWorkspace.id);
+			const workspace = registerWorkspace(persistedWorkspace.path, {
+				requireGitRepo: true,
+				preferredId: persistedWorkspace.id,
+				parentWorkspaceId: persistedWorkspace.parentWorkspaceId,
+				repoRootPath: persistedWorkspace.repoRootPath,
+				branchName: persistedWorkspace.branchName,
+			});
+			await refreshWorkspaceGitMetadata(workspace);
 			persistWorkspaceRecord(workspace);
+			appendConduitWorkspaceEvent(workspace.id, 'hydrated');
 			hydratedWorkspaceCount++;
 		} catch (error) {
 			console.warn(
@@ -776,7 +835,22 @@ async function startServer() {
 		}
 	}
 
-	const initialWorkspace = registerWorkspace(process.cwd(), true);
+	for (const workspace of workspacesById.values()) {
+		if (!workspace.parentWorkspaceId) {
+			continue;
+		}
+
+		const parentWorkspace = workspacesById.get(workspace.parentWorkspaceId);
+		if (!parentWorkspace || workspace.repoRootPath === parentWorkspace.repoRootPath) {
+			continue;
+		}
+
+		workspace.repoRootPath = parentWorkspace.repoRootPath;
+		persistWorkspaceRecord(workspace);
+	}
+
+	const initialWorkspace = registerWorkspace(process.cwd(), { requireGitRepo: true });
+	await refreshWorkspaceGitMetadata(initialWorkspace);
 	persistWorkspaceRecord(initialWorkspace);
 
 	const restoredActiveWorkspace = persistedActiveWorkspaceId
@@ -858,12 +932,45 @@ async function startServer() {
 	}
 
 	function persistWorkspaceRecord(workspace: WorkspaceContext): void {
-		upsertConduitWorkspace(workspace.id, workspace.rootPath);
+		upsertConduitWorkspace({
+			id: workspace.id,
+			path: workspace.rootPath,
+			repoRootPath: workspace.repoRootPath,
+			branchName: workspace.branchName,
+			parentWorkspaceId: workspace.parentWorkspaceId,
+			lifecycleState: 'ready',
+		});
 	}
 
 	function persistAndActivateWorkspace(workspace: WorkspaceContext): void {
 		persistWorkspaceRecord(workspace);
 		activateConduitWorkspace(workspace.id);
+		appendConduitWorkspaceEvent(workspace.id, 'activated');
+	}
+
+	async function refreshWorkspaceGitMetadata(workspace: WorkspaceContext): Promise<void> {
+		try {
+			const metadata = await resolveWorkspaceGitMetadata(workspace.rootPath);
+			const parentWorkspace = workspace.parentWorkspaceId
+				? workspacesById.get(workspace.parentWorkspaceId) || null
+				: null;
+			const normalizedRepoRootPath = parentWorkspace ? parentWorkspace.repoRootPath : metadata.repoRootPath;
+			if (workspace.repoRootPath === normalizedRepoRootPath && workspace.branchName === metadata.branchName) {
+				return;
+			}
+			workspace.repoRootPath = normalizedRepoRootPath;
+			workspace.branchName = metadata.branchName;
+			persistWorkspaceRecord(workspace);
+			appendConduitWorkspaceEvent(
+				workspace.id,
+				'branch_updated',
+				workspace.branchName
+					? `Current branch: ${workspace.branchName}`
+					: 'Workspace is in detached HEAD state',
+			);
+		} catch (error) {
+			console.warn(`⚠️  Failed to refresh git metadata for workspace ${workspace.id}:`, error);
+		}
 	}
 
 	function syncActiveWorkspaceRecord(): void {
@@ -940,6 +1047,44 @@ async function startServer() {
 			}
 
 			return workspace;
+		}
+
+		function chooseFallbackWorkspaceForRemoval(removedWorkspaceId: string): WorkspaceContext | null {
+			if (activeWorkspaceId === removedWorkspaceId) {
+				const fallbackWorkspace = getMostRecentlyModifiedWorkspace();
+				activeWorkspaceId = fallbackWorkspace ? fallbackWorkspace.id : null;
+				return fallbackWorkspace;
+			}
+
+			const activeWorkspace = activeWorkspaceId ? workspacesById.get(activeWorkspaceId) || null : null;
+			if (activeWorkspace) {
+				return activeWorkspace;
+			}
+
+			const fallbackWorkspace = getMostRecentlyModifiedWorkspace();
+			activeWorkspaceId = fallbackWorkspace ? fallbackWorkspace.id : null;
+			return fallbackWorkspace;
+		}
+
+		function reassignSocketsFromWorkspace(
+			removedWorkspaceId: string,
+			fallbackWorkspace: WorkspaceContext | null,
+		): void {
+			for (const connectedSocket of io.sockets.sockets.values()) {
+				if (connectedSocket.data.workspaceId !== removedWorkspaceId) {
+					continue;
+				}
+
+				if (fallbackWorkspace) {
+					subscribeSocketToWorkspace(connectedSocket, fallbackWorkspace);
+					continue;
+				}
+
+				for (const workspace of workspacesById.values()) {
+					workspace.subscribers.delete(connectedSocket.id);
+				}
+				connectedSocket.data.workspaceId = null;
+			}
 		}
 
 		function ensureAuthenticated(updateEvent: string): boolean {
@@ -1021,14 +1166,16 @@ async function startServer() {
 		});
 
 		// Initialize and select workspace
-		socket.on('workspace:init', (params: { path: string }) => {
+		socket.on('workspace:init', async (params: { path: string }) => {
 			if (!ensureAuthenticated('workspace:init:update')) {
 				return;
 			}
 
 			try {
-				const workspace = registerWorkspace(params?.path, true);
+				const workspace = registerWorkspace(params?.path, { requireGitRepo: true });
+				await refreshWorkspaceGitMetadata(workspace);
 				persistAndActivateWorkspace(workspace);
+				appendConduitWorkspaceEvent(workspace.id, 'created');
 				subscribeSocketToWorkspace(socket, workspace);
 
 				socket.emit('workspace:init:update', {
@@ -1062,8 +1209,10 @@ async function startServer() {
 					return;
 				}
 
-				const workspace = registerWorkspace(selection.path, true);
+				const workspace = registerWorkspace(selection.path, { requireGitRepo: true });
+				await refreshWorkspaceGitMetadata(workspace);
 				persistAndActivateWorkspace(workspace);
+				appendConduitWorkspaceEvent(workspace.id, 'created');
 				subscribeSocketToWorkspace(socket, workspace);
 
 				socket.emit('workspace:select:update', {
@@ -1096,40 +1245,22 @@ async function startServer() {
 			}
 
 			try {
+				const workspaceToRemove = workspacesById.get(params.workspaceId);
+				if (workspaceToRemove && isWorkspaceWorktree(workspaceToRemove)) {
+					socket.emit('workspace:remove:update', {
+						success: false,
+						error: 'Worktree workspaces must be cleaned up via workspace:worktree:cleanup',
+					});
+					return;
+				}
+
 				// Remove from DB first so an FK violation (e.g. workspace has sessions)
 				// doesn't leave in-memory state inconsistent with the database.
 				removeConduitWorkspace(params.workspaceId);
 
-				const wasRemovingActiveWorkspace = activeWorkspaceId === params.workspaceId;
 				unregisterWorkspace(params.workspaceId);
-
-				let fallbackWorkspace: WorkspaceContext | null;
-				if (wasRemovingActiveWorkspace) {
-					fallbackWorkspace = getMostRecentlyModifiedWorkspace();
-					activeWorkspaceId = fallbackWorkspace ? fallbackWorkspace.id : null;
-				} else {
-					fallbackWorkspace = (activeWorkspaceId && workspacesById.get(activeWorkspaceId)) || null;
-					if (!fallbackWorkspace) {
-						fallbackWorkspace = getMostRecentlyModifiedWorkspace();
-						activeWorkspaceId = fallbackWorkspace ? fallbackWorkspace.id : null;
-					}
-				}
-
-				for (const connectedSocket of io.sockets.sockets.values()) {
-					if (connectedSocket.data.workspaceId !== params.workspaceId) {
-						continue;
-					}
-
-					if (fallbackWorkspace) {
-						subscribeSocketToWorkspace(connectedSocket, fallbackWorkspace);
-						continue;
-					}
-
-					for (const workspace of workspacesById.values()) {
-						workspace.subscribers.delete(connectedSocket.id);
-					}
-					connectedSocket.data.workspaceId = null;
-				}
+				const fallbackWorkspace = chooseFallbackWorkspaceForRemoval(params.workspaceId);
+				reassignSocketsFromWorkspace(params.workspaceId, fallbackWorkspace);
 
 				syncActiveWorkspaceRecord();
 
@@ -1154,7 +1285,7 @@ async function startServer() {
 			});
 		});
 
-		socket.on('workspace:activate', (params: { workspaceId?: string } = {}) => {
+		socket.on('workspace:activate', async (params: { workspaceId?: string } = {}) => {
 			if (!ensureAuthenticated('workspace:activate:update')) {
 				return;
 			}
@@ -1176,6 +1307,7 @@ async function startServer() {
 				return;
 			}
 
+			await refreshWorkspaceGitMetadata(workspace);
 			persistAndActivateWorkspace(workspace);
 			subscribeSocketToWorkspace(socket, workspace);
 			socket.emit('workspace:activate:update', {
@@ -1187,6 +1319,24 @@ async function startServer() {
 			emitWorkspaceStatusUpdate();
 		});
 
+		registerWorktreeSocketHandlers({
+			socket,
+			ensureAuthenticated,
+			resolveWorkspaceOrEmitError,
+			workspacesById,
+			listWorkspaceSummaries,
+			registerWorkspace: (inputPath, options) => registerWorkspace(inputPath, options),
+			persistWorkspaceRecord,
+			persistAndActivateWorkspace,
+			subscribeSocketToWorkspace,
+			buildWorkspaceStatus,
+			emitWorkspaceStatusUpdate,
+			unregisterWorkspace,
+			chooseFallbackWorkspaceForRemoval,
+			reassignSocketsFromWorkspace,
+			syncActiveWorkspaceRecord,
+		});
+
 		type WorkspaceParams = { workspaceId?: string };
 		type WorkspaceGitOperation = ReturnType<typeof createGitOperations>;
 
@@ -1195,7 +1345,7 @@ async function startServer() {
 			updateEvent: string,
 			operationName: string,
 			operation: (gitOperations: WorkspaceGitOperation) => Promise<unknown>,
-			onSuccess?: (workspace: WorkspaceContext) => void,
+			onSuccess?: (workspace: WorkspaceContext) => void | Promise<void>,
 		): Promise<void> {
 			const workspace = resolveWorkspaceOrEmitError(params?.workspaceId, updateEvent);
 			if (!workspace) {
@@ -1205,7 +1355,7 @@ async function startServer() {
 			const workspaceGitOperations = createGitOperations(workspace.rootPath);
 			const result = await handleSocketGitOperation(() => operation(workspaceGitOperations), operationName);
 			if (result.success) {
-				onSuccess?.(workspace);
+				await onSuccess?.(workspace);
 			}
 
 			socket.emit(updateEvent, { workspaceId: workspace.id, ...result });
@@ -1354,13 +1504,14 @@ async function startServer() {
 				'git:checkout:update',
 				'checkout git branch',
 				(gitOperations) => gitOperations.checkout(params.target, params.isFile || false),
-				(workspace) => {
+				async (workspace) => {
 					if (params.isFile) {
 						invalidateFileHashCache(workspace, [params.target]);
 						return;
 					}
 
 					invalidateFileHashCache(workspace);
+					await refreshWorkspaceGitMetadata(workspace);
 				},
 			);
 		});
@@ -1823,16 +1974,30 @@ async function startServer() {
 		return workspacesById.get(targetWorkspaceId) || null;
 	}
 
-	function registerWorkspace(
-		inputPath: string,
-		requireGitRepo: boolean = true,
-		preferredId?: string,
-	): WorkspaceContext {
+	interface RegisterWorkspaceOptions {
+		requireGitRepo?: boolean;
+		preferredId?: string;
+		parentWorkspaceId?: string | null;
+		repoRootPath?: string;
+		branchName?: string | null;
+	}
+
+	function registerWorkspace(inputPath: string, options: RegisterWorkspaceOptions = {}): WorkspaceContext {
+		const requireGitRepo = options.requireGitRepo ?? true;
 		const normalizedPath = normalizeWorkspacePath(inputPath);
 		const existingWorkspaceId = workspaceIdByRootPath.get(normalizedPath);
 		if (existingWorkspaceId) {
 			const existingWorkspace = workspacesById.get(existingWorkspaceId);
 			if (existingWorkspace) {
+				if (options.repoRootPath) {
+					existingWorkspace.repoRootPath = options.repoRootPath;
+				}
+				if (options.branchName !== undefined) {
+					existingWorkspace.branchName = options.branchName;
+				}
+				if (options.parentWorkspaceId !== undefined) {
+					existingWorkspace.parentWorkspaceId = options.parentWorkspaceId || null;
+				}
 				if (!existingWorkspace.watcher) {
 					setupWorkspaceWatcher(existingWorkspace);
 				}
@@ -1844,17 +2009,27 @@ async function startServer() {
 			throw new Error('Workspace must be a git repository. Run `git init` in that directory first.');
 		}
 
+		const repoRootPath = options.repoRootPath || normalizedPath;
+		const branchName = options.branchName !== undefined ? options.branchName : null;
+
 		let workspaceId = createWorkspaceId(normalizedPath);
-		if (preferredId) {
-			const existingByPreferredId = workspacesById.get(preferredId);
-			if (!existingByPreferredId || existingByPreferredId.rootPath === normalizedPath) {
-				workspaceId = preferredId;
+		if (options.preferredId) {
+			const existingByPreferredId = workspacesById.get(options.preferredId);
+			const persistedByPreferredId = getConduitWorkspaceById(options.preferredId);
+			const isPreferredIdReusable =
+				(!existingByPreferredId || existingByPreferredId.rootPath === normalizedPath) &&
+				(!persistedByPreferredId || persistedByPreferredId.path === normalizedPath);
+			if (isPreferredIdReusable) {
+				workspaceId = options.preferredId;
 			}
 		}
 
 		const workspace: WorkspaceContext = {
 			id: workspaceId,
 			rootPath: normalizedPath,
+			repoRootPath,
+			branchName,
+			parentWorkspaceId: options.parentWorkspaceId || null,
 			watcher: null,
 			gitignorePatterns: [],
 			fileHashes: new Map<string, string>(),
@@ -1897,6 +2072,7 @@ async function startServer() {
 		workspacesById.delete(workspaceId);
 		workspaceIdByRootPath.delete(workspace.rootPath);
 		releaseGitClient(workspace.rootPath);
+		releaseGitClient(workspace.repoRootPath);
 
 		return workspace;
 	}

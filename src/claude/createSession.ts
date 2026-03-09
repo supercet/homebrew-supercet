@@ -6,7 +6,7 @@ import {
 	validateConduitSessionRequestMetadata,
 	type ConduitSessionCaptureHandle,
 } from '../utils/headlessCliHelpers';
-import { getConduitWorkspaceById } from '../db/sqlite';
+import { resolveReadyWorkspaceForNewWork } from '../utils/workspaceReadiness';
 
 /**
  * REST API handler to create a new headless CLI session
@@ -46,9 +46,9 @@ export async function createSession(c: Context) {
 			return c.json({ error: error instanceof Error ? error.message : 'Invalid session metadata' }, 400);
 		}
 
-		const workspace = getConduitWorkspaceById(workspaceId);
-		if (!workspace) {
-			return c.json({ error: `Workspace '${workspaceId}' was not found` }, 400);
+		const { workspace, error: workspaceError } = resolveReadyWorkspaceForNewWork(workspaceId);
+		if (!workspace || workspaceError) {
+			return c.json({ error: workspaceError || 'Workspace is not ready for new work' }, 400);
 		}
 
 		let cli: 'claude' | 'codex';
