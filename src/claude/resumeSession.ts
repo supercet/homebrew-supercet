@@ -13,7 +13,7 @@ import { resolveReadyWorkspaceForNewWork } from '../utils/workspaceReadiness';
  * REST API handler to resume an existing headless CLI session
  * POST /api/claude/session/:sessionId/resume
  * Body: {
- *   prompt: string,
+ *   prompt?: string,
  *   context?: string,
  *   cli?: 'claude' | 'codex',
  *   model?: string,
@@ -34,8 +34,8 @@ export async function resumeSession(c: Context) {
 			return c.json({ error: 'Session ID is required and must be a string' }, 400);
 		}
 
-		if (!prompt || typeof prompt !== 'string') {
-			return c.json({ error: 'Prompt is required and must be a string' }, 400);
+		if (prompt !== undefined && typeof prompt !== 'string') {
+			return c.json({ error: 'Prompt must be a string when provided' }, 400);
 		}
 
 		if (model !== undefined && typeof model !== 'string') {

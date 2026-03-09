@@ -12,7 +12,7 @@ import { resolveReadyWorkspaceForNewWork } from '../utils/workspaceReadiness';
  * REST API handler to resume an existing Codex session
  * POST /api/codex/session/:sessionId/resume
  * Body: {
- *   prompt: string,
+ *   prompt?: string,
  *   context?: string,
  *   model?: string,
  *   agentId: string,
@@ -32,8 +32,8 @@ export async function resumeCodexSessionRoute(c: Context) {
 			return c.json({ error: 'Session ID is required and must be a string' }, 400);
 		}
 
-		if (!prompt || typeof prompt !== 'string') {
-			return c.json({ error: 'Prompt is required and must be a string' }, 400);
+		if (prompt !== undefined && typeof prompt !== 'string') {
+			return c.json({ error: 'Prompt must be a string when provided' }, 400);
 		}
 
 		if (model !== undefined && typeof model !== 'string') {
