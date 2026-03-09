@@ -7,11 +7,11 @@ import {
 	appendConduitSessionEvent,
 	createConduitSession,
 	findLatestConduitSessionIdByProviderSession,
-	getConduitWorkspaceById,
 	setConduitSessionProviderSessionId,
 	setConduitSessionStatus,
 	updateConduitSessionForRun,
 } from '../db/sqlite';
+import { resolveReadyWorkspaceForNewWork } from './workspaceReadiness';
 
 export type SupportedCli = 'claude' | 'codex';
 
@@ -645,9 +645,11 @@ export function handleHeadlessSessionCreate(socket: Socket, eventPrefix: string,
 			}
 
 			validateConduitSessionRequestMetadata({ agentId, workspaceId, pipelineId });
-			const workspace = getConduitWorkspaceById(workspaceId);
-			if (!workspace) {
-				socket.emit(`${eventPrefix}:error`, { error: `Workspace '${workspaceId}' was not found` });
+			const { workspace, error: workspaceError } = resolveReadyWorkspaceForNewWork(workspaceId);
+			if (!workspace || workspaceError) {
+				socket.emit(`${eventPrefix}:error`, {
+					error: workspaceError || 'Workspace is not ready for new work',
+				});
 				return;
 			}
 
@@ -728,9 +730,11 @@ export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string,
 			}
 
 			validateConduitSessionRequestMetadata({ agentId, workspaceId, pipelineId });
-			const workspace = getConduitWorkspaceById(workspaceId);
-			if (!workspace) {
-				socket.emit(`${eventPrefix}:error`, { error: `Workspace '${workspaceId}' was not found` });
+			const { workspace, error: workspaceError } = resolveReadyWorkspaceForNewWork(workspaceId);
+			if (!workspace || workspaceError) {
+				socket.emit(`${eventPrefix}:error`, {
+					error: workspaceError || 'Workspace is not ready for new work',
+				});
 				return;
 			}
 

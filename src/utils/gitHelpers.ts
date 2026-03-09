@@ -167,6 +167,17 @@ export function createGitOperations(baseDir: string = process.cwd()) {
 
 		branches: async () => await git.branch(['-l']),
 
+		currentBranch: async () => {
+			const currentBranch = await git.raw(['branch', '--show-current']);
+			const normalizedBranch = currentBranch.trim();
+			return normalizedBranch.length > 0 ? normalizedBranch : null;
+		},
+
+		repoRoot: async () => {
+			const rootPath = await git.revparse(['--show-toplevel']);
+			return rootPath.trim();
+		},
+
 		commits: async (branch?: string, from?: string, to?: string) => {
 			const args = [branch, from, to].filter((item) => item !== undefined && item !== null);
 			return args.length ? await git.log(args) : await git.log();
@@ -235,6 +246,21 @@ export function createGitOperations(baseDir: string = process.cwd()) {
 			}
 			return await git.checkout([target]);
 		},
+
+		worktreeAdd: async (worktreePath: string, branchName: string, fromRef: string = 'HEAD') => {
+			return await git.raw(['worktree', 'add', '-b', branchName, worktreePath, fromRef]);
+		},
+
+		worktreeRemove: async (worktreePath: string, force: boolean = false) => {
+			const args = ['worktree', 'remove'];
+			if (force) {
+				args.push('--force');
+			}
+			args.push(worktreePath);
+			return await git.raw(args);
+		},
+
+		worktreePrune: async () => await git.raw(['worktree', 'prune']),
 	};
 }
 

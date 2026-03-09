@@ -37,6 +37,14 @@ interface SQLiteTableRow {
 	name: string;
 }
 
+interface SQLiteTableInfoRow {
+	name: string;
+}
+
+interface SQLiteIdRow {
+	id: string;
+}
+
 interface SQLiteUserVersionRow {
 	user_version: number;
 }
@@ -50,6 +58,11 @@ interface SQLiteCheckRow {
 interface ConduitWorkspaceRow {
 	id: string;
 	path: string;
+	repo_root_path: string;
+	branch_name: string | null;
+	parent_workspace_id: string | null;
+	lifecycle_state: ConduitWorkspaceLifecycleState;
+	completed_at: string | null;
 	is_active: number;
 	created_at: string;
 	updated_at: string;
@@ -109,12 +122,29 @@ export interface SQLiteHealth {
 export interface ConduitWorkspaceRecord {
 	id: string;
 	path: string;
+	repoRootPath: string;
+	branchName: string | null;
+	parentWorkspaceId: string | null;
+	lifecycleState: ConduitWorkspaceLifecycleState;
+	completedAt: string | null;
 	isActive: boolean;
+	isWorktree: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
 
 export type ConduitProvider = 'claude' | 'codex';
+export type ConduitWorkspaceLifecycleState = 'ready' | 'completed' | 'cleanup_failed';
+export type ConduitWorkspaceEventType =
+	| 'created'
+	| 'activated'
+	| 'branch_updated'
+	| 'worktree_created'
+	| 'worktree_cleanup_started'
+	| 'worktree_cleanup_completed'
+	| 'worktree_cleanup_failed'
+	| 'completed'
+	| 'hydrated';
 export type ConduitSessionStatus = 'created' | 'running' | 'completed' | 'error' | 'timed_out' | 'cancelled';
 export type ConduitSessionEventType =
 	| 'prompt'
@@ -186,10 +216,25 @@ export interface ReconcileRunningConduitSessionsResult {
 	cancelledSessionIds: string[];
 }
 
+export interface UpsertConduitWorkspaceInput {
+	id: string;
+	path: string;
+	repoRootPath: string;
+	branchName?: string | null;
+	parentWorkspaceId?: string | null;
+	lifecycleState?: ConduitWorkspaceLifecycleState;
+}
+
 let sqliteDb: SQLiteDatabase | null = null;
 let sqliteDbPath: string | null = null;
-const LATEST_SCHEMA_VERSION = 1;
-const REQUIRED_TABLES = ['db_health_checks', 'conduit_workspaces', 'conduit_sessions', 'conduit_session_events'];
+const LATEST_SCHEMA_VERSION = 2;
+const REQUIRED_TABLES = [
+	'db_health_checks',
+	'conduit_workspaces',
+	'conduit_workspace_events',
+	'conduit_sessions',
+	'conduit_session_events',
+];
 
 function resolveDatabasePath(): string {
 	const configuredPath = process.env.SUPERCET_DB_PATH?.trim();
@@ -299,6 +344,87 @@ function applySchemaV1(db: SQLiteDatabase) {
 
 		CREATE INDEX IF NOT EXISTS idx_conduit_session_events_created_at
 			ON conduit_session_events(created_at);
+		`);
+}
+
+function columnExists(db: SQLiteDatabase, tableName: string, columnName: string): boolean {
+	const rows = db.prepare<SQLiteTableInfoRow>(`PRAGMA table_info(${tableName})`).all();
+	return rows.some((row) => row.name === columnName);
+}
+
+function applySchemaV2(db: SQLiteDatabase) {
+	if (!columnExists(db, 'conduit_workspaces', 'repo_root_path')) {
+		db.exec('ALTER TABLE conduit_workspaces ADD COLUMN repo_root_path TEXT');
+	}
+	if (!columnExists(db, 'conduit_workspaces', 'branch_name')) {
+		db.exec('ALTER TABLE conduit_workspaces ADD COLUMN branch_name TEXT');
+	}
+	if (!columnExists(db, 'conduit_workspaces', 'parent_workspace_id')) {
+		db.exec(
+			'ALTER TABLE conduit_workspaces ADD COLUMN parent_workspace_id TEXT REFERENCES conduit_workspaces(id) ON UPDATE CASCADE ON DELETE RESTRICT',
+		);
+	}
+	if (!columnExists(db, 'conduit_workspaces', 'lifecycle_state')) {
+		db.exec("ALTER TABLE conduit_workspaces ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'ready'");
+	}
+	if (!columnExists(db, 'conduit_workspaces', 'completed_at')) {
+		db.exec('ALTER TABLE conduit_workspaces ADD COLUMN completed_at TEXT');
+	}
+
+	db.exec(`
+		UPDATE conduit_workspaces
+		SET
+			repo_root_path = COALESCE(NULLIF(repo_root_path, ''), path),
+			lifecycle_state = CASE
+				WHEN lifecycle_state IN ('ready', 'completed', 'cleanup_failed') THEN lifecycle_state
+				ELSE 'ready'
+			END,
+			updated_at = datetime('now')
+		WHERE
+			repo_root_path IS NULL
+			OR repo_root_path = ''
+			OR lifecycle_state IS NULL
+			OR lifecycle_state NOT IN ('ready', 'completed', 'cleanup_failed');
+	`);
+
+	db.exec(`
+		CREATE INDEX IF NOT EXISTS idx_conduit_workspaces_repo_root_path
+			ON conduit_workspaces(repo_root_path);
+
+		CREATE INDEX IF NOT EXISTS idx_conduit_workspaces_parent_workspace_id
+			ON conduit_workspaces(parent_workspace_id);
+
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_conduit_workspaces_ready_branch_unique
+			ON conduit_workspaces(repo_root_path, branch_name)
+			WHERE parent_workspace_id IS NOT NULL
+				AND lifecycle_state = 'ready'
+				AND branch_name IS NOT NULL;
+
+		CREATE TABLE IF NOT EXISTS conduit_workspace_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workspace_id TEXT NOT NULL,
+			event_type TEXT NOT NULL CHECK (
+				event_type IN (
+					'created',
+					'activated',
+					'branch_updated',
+					'worktree_created',
+					'worktree_cleanup_started',
+					'worktree_cleanup_completed',
+					'worktree_cleanup_failed',
+					'completed',
+					'hydrated'
+				)
+			),
+			details TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (workspace_id) REFERENCES conduit_workspaces(id)
+				ON UPDATE CASCADE
+				ON DELETE CASCADE
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_conduit_workspace_events_workspace_created_at
+			ON conduit_workspace_events(workspace_id, created_at DESC);
 	`);
 }
 
@@ -331,6 +457,10 @@ function runSchemaMigrations(db: SQLiteDatabase): void {
 			applySchemaV1(db);
 			setSchemaVersion(db, 1);
 		}
+		if (currentVersion < 2) {
+			applySchemaV2(db);
+			setSchemaVersion(db, 2);
+		}
 		db.exec('COMMIT');
 	} catch (error) {
 		db.exec('ROLLBACK');
@@ -343,6 +473,7 @@ function runSchemaMigrations(db: SQLiteDatabase): void {
 		db.exec('BEGIN IMMEDIATE');
 		try {
 			applySchemaV1(db);
+			applySchemaV2(db);
 			const currentVersion = getSchemaVersion(db);
 			if (currentVersion < LATEST_SCHEMA_VERSION) {
 				setSchemaVersion(db, LATEST_SCHEMA_VERSION);
@@ -480,7 +611,13 @@ function mapConduitWorkspaceRow(row: ConduitWorkspaceRow): ConduitWorkspaceRecor
 	return {
 		id: row.id,
 		path: row.path,
+		repoRootPath: row.repo_root_path,
+		branchName: row.branch_name,
+		parentWorkspaceId: row.parent_workspace_id,
+		lifecycleState: row.lifecycle_state,
+		completedAt: row.completed_at,
 		isActive: row.is_active === 1,
+		isWorktree: row.parent_workspace_id !== null,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
@@ -519,7 +656,47 @@ export function listConduitWorkspaces(): ConduitWorkspaceRecord[] {
 	const db = getDatabase();
 	const rows = db
 		.prepare<ConduitWorkspaceRow>(
-			'SELECT id, path, is_active, created_at, updated_at FROM conduit_workspaces ORDER BY created_at ASC',
+			`
+				SELECT
+					id,
+					path,
+					repo_root_path,
+					branch_name,
+					parent_workspace_id,
+					lifecycle_state,
+					completed_at,
+					is_active,
+					created_at,
+					updated_at
+				FROM conduit_workspaces
+				ORDER BY created_at ASC
+			`,
+		)
+		.all();
+
+	return rows.map(mapConduitWorkspaceRow);
+}
+
+export function listReadyConduitWorkspaces(): ConduitWorkspaceRecord[] {
+	const db = getDatabase();
+	const rows = db
+		.prepare<ConduitWorkspaceRow>(
+			`
+				SELECT
+					id,
+					path,
+					repo_root_path,
+					branch_name,
+					parent_workspace_id,
+					lifecycle_state,
+					completed_at,
+					is_active,
+					created_at,
+					updated_at
+				FROM conduit_workspaces
+				WHERE lifecycle_state = 'ready'
+				ORDER BY created_at ASC
+			`,
 		)
 		.all();
 
@@ -531,27 +708,111 @@ export function listConduitWorkspacesByMostRecentUpdate(): ConduitWorkspaceRecor
 	const rows = db
 		.prepare<ConduitWorkspaceRow>(
 			`
-				SELECT id, path, is_active, created_at, updated_at
-				FROM conduit_workspaces
-				ORDER BY updated_at DESC, created_at DESC
-			`,
+					SELECT
+						id,
+						path,
+						repo_root_path,
+						branch_name,
+						parent_workspace_id,
+						lifecycle_state,
+						completed_at,
+						is_active,
+						created_at,
+						updated_at
+					FROM conduit_workspaces
+					WHERE lifecycle_state = 'ready'
+					ORDER BY updated_at DESC, created_at DESC
+				`,
 		)
 		.all();
 
 	return rows.map(mapConduitWorkspaceRow);
 }
 
-export function upsertConduitWorkspace(id: string, workspacePath: string): void {
+export function upsertConduitWorkspace(input: UpsertConduitWorkspaceInput): void {
 	const db = getDatabase();
+	const lifecycleState = input.lifecycleState || 'ready';
+	const branchName = input.branchName ?? null;
+	const parentWorkspaceId = input.parentWorkspaceId ?? null;
 	db.prepare(
 		`
-			INSERT INTO conduit_workspaces (id, path, is_active)
-			VALUES (?, ?, 0)
-			ON CONFLICT(id) DO UPDATE SET
-				path = excluded.path,
-				updated_at = datetime('now')
-		`,
-	).run(id, workspacePath);
+				INSERT INTO conduit_workspaces (
+					id,
+					path,
+					repo_root_path,
+					branch_name,
+					parent_workspace_id,
+					lifecycle_state,
+					completed_at,
+					is_active
+				)
+				VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? = 'completed' THEN datetime('now') ELSE NULL END, 0)
+				ON CONFLICT(id) DO UPDATE SET
+					path = excluded.path,
+					repo_root_path = excluded.repo_root_path,
+					branch_name = excluded.branch_name,
+					parent_workspace_id = excluded.parent_workspace_id,
+					lifecycle_state = excluded.lifecycle_state,
+					completed_at = CASE
+						WHEN excluded.lifecycle_state = 'completed' AND conduit_workspaces.completed_at IS NULL
+							THEN datetime('now')
+						WHEN excluded.lifecycle_state = 'completed'
+							THEN conduit_workspaces.completed_at
+						ELSE NULL
+					END,
+					updated_at = datetime('now')
+			`,
+	).run(input.id, input.path, input.repoRootPath, branchName, parentWorkspaceId, lifecycleState, lifecycleState);
+}
+
+export function conduitWorkspaceIdExists(workspaceId: string): boolean {
+	const db = getDatabase();
+	const row = db.prepare<SQLiteIdRow>('SELECT id FROM conduit_workspaces WHERE id = ? LIMIT 1').get(workspaceId);
+	return row?.id === workspaceId;
+}
+
+export function setConduitWorkspaceLifecycleState(
+	workspaceId: string,
+	lifecycleState: ConduitWorkspaceLifecycleState,
+): void {
+	const db = getDatabase();
+	const result = db
+		.prepare(
+			`
+				UPDATE conduit_workspaces
+				SET
+					lifecycle_state = ?,
+					is_active = CASE WHEN ? = 'ready' THEN is_active ELSE 0 END,
+					completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, datetime('now')) ELSE completed_at END,
+					updated_at = datetime('now')
+				WHERE id = ?
+			`,
+		)
+		.run(lifecycleState, lifecycleState, lifecycleState, workspaceId);
+
+	if (normalizeChanges(result) === 0) {
+		throw new Error(`Workspace '${workspaceId}' was not found in conduit_workspaces`);
+	}
+}
+
+export function appendConduitWorkspaceEvent(
+	workspaceId: string,
+	eventType: ConduitWorkspaceEventType,
+	details?: string | null,
+): void {
+	const db = getDatabase();
+	const result = db
+		.prepare(
+			`
+				INSERT INTO conduit_workspace_events (workspace_id, event_type, details)
+				VALUES (?, ?, ?)
+			`,
+		)
+		.run(workspaceId, eventType, details || null);
+
+	if (normalizeChanges(result) === 0) {
+		throw new Error(`Failed to append workspace event for workspace '${workspaceId}'`);
+	}
 }
 
 export function setConduitWorkspaceActiveState(workspaceId: string, isActive: boolean): void {
@@ -559,10 +820,10 @@ export function setConduitWorkspaceActiveState(workspaceId: string, isActive: bo
 	const result = db
 		.prepare(
 			`
-				UPDATE conduit_workspaces
-				SET is_active = ?, updated_at = datetime('now')
-				WHERE id = ?
-			`,
+					UPDATE conduit_workspaces
+					SET is_active = ?, updated_at = datetime('now')
+					WHERE id = ? AND lifecycle_state = 'ready'
+				`,
 		)
 		.run(isActive ? 1 : 0, workspaceId);
 
@@ -611,7 +872,30 @@ export function removeConduitWorkspace(workspaceId: string): void {
 		}
 	} catch (error) {
 		if (error instanceof Error && error.message.includes('FOREIGN KEY constraint failed')) {
-			throw new Error(`Cannot remove workspace '${workspaceId}' because it has associated sessions`);
+			const sessionCountRow = db
+				.prepare<SQLiteCountRow>('SELECT COUNT(*) AS count FROM conduit_sessions WHERE workspace_id = ?')
+				.get(workspaceId);
+			const childWorkspaceCountRow = db
+				.prepare<SQLiteCountRow>(
+					'SELECT COUNT(*) AS count FROM conduit_workspaces WHERE parent_workspace_id = ?',
+				)
+				.get(workspaceId);
+			const sessionCount = Number(sessionCountRow?.count || 0);
+			const childWorkspaceCount = Number(childWorkspaceCountRow?.count || 0);
+
+			if (sessionCount > 0 && childWorkspaceCount > 0) {
+				throw new Error(
+					`Cannot remove workspace '${workspaceId}' because it has associated sessions and child worktrees`,
+				);
+			}
+			if (sessionCount > 0) {
+				throw new Error(`Cannot remove workspace '${workspaceId}' because it has associated sessions`);
+			}
+			if (childWorkspaceCount > 0) {
+				throw new Error(`Cannot remove workspace '${workspaceId}' because it has child worktrees`);
+			}
+
+			throw new Error(`Cannot remove workspace '${workspaceId}' because dependent records still reference it`);
 		}
 		throw error;
 	}
@@ -621,7 +905,21 @@ export function getConduitWorkspaceById(workspaceId: string): ConduitWorkspaceRe
 	const db = getDatabase();
 	const row = db
 		.prepare<ConduitWorkspaceRow>(
-			'SELECT id, path, is_active, created_at, updated_at FROM conduit_workspaces WHERE id = ?',
+			`
+				SELECT
+					id,
+					path,
+					repo_root_path,
+					branch_name,
+					parent_workspace_id,
+					lifecycle_state,
+					completed_at,
+					is_active,
+					created_at,
+					updated_at
+				FROM conduit_workspaces
+				WHERE id = ?
+			`,
 		)
 		.get(workspaceId);
 
