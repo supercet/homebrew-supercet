@@ -24,7 +24,7 @@ export async function createClaudeCodeSession(
 
 export async function resumeClaudeCodeSession(
 	sessionId: string,
-	prompt: string,
+	prompt: string | undefined,
 	workingDir: string,
 	streamCallback?: (data: {
 		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error';
@@ -57,7 +57,7 @@ export async function createCodexSession(
 
 export async function resumeCodexSession(
 	sessionId: string,
-	prompt: string,
+	prompt: string | undefined,
 	workingDir: string,
 	streamCallback?: (data: {
 		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error';

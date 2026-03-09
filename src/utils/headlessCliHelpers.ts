@@ -29,7 +29,7 @@ export interface StreamEvent {
 }
 
 interface CliSessionOptions {
-	prompt: string;
+	prompt?: string;
 	workingDir: string;
 	sessionId?: string;
 	model?: string;
@@ -38,7 +38,7 @@ interface CliSessionOptions {
 
 interface SocketSessionPayload {
 	sessionId?: string;
-	prompt: string;
+	prompt?: string;
 	context?: string;
 	cli?: SupportedCli;
 	model?: string;
@@ -99,7 +99,7 @@ export function validateConduitSessionRequestMetadata(metadata: ConduitSessionRe
 function startConduitSessionCapture(
 	cli: SupportedCli,
 	metadata: ConduitSessionRequestMetadata,
-	prompt: string,
+	prompt?: string,
 	model?: string,
 	providerSessionId?: string,
 	context?: string,
@@ -134,7 +134,9 @@ function startConduitSessionCapture(
 		});
 	}
 
-	appendConduitSessionEvent(conduitSessionId, 'prompt', 'client', prompt);
+	if (prompt && prompt.trim()) {
+		appendConduitSessionEvent(conduitSessionId, 'prompt', 'client', prompt);
+	}
 	if (context && context.trim()) {
 		appendConduitSessionEvent(conduitSessionId, 'context', 'client', context);
 	}
@@ -177,7 +179,7 @@ export interface ConduitSessionCaptureHandle {
 export function beginConduitSessionCapture(
 	cli: SupportedCli,
 	metadata: ConduitSessionRequestMetadata,
-	prompt: string,
+	prompt?: string,
 	model?: string,
 	providerSessionId?: string,
 	context?: string,
@@ -235,6 +237,18 @@ function validatePrompt(prompt: string): string {
 	return prompt;
 }
 
+function normalizeResumePrompt(prompt: unknown): string | undefined {
+	if (prompt === undefined || prompt === null) {
+		return undefined;
+	}
+
+	if (typeof prompt !== 'string') {
+		throw new Error('Prompt must be a string when provided');
+	}
+
+	return prompt.trim() ? prompt : undefined;
+}
+
 /**
  * Validates that a session ID is a valid UUID format
  */
@@ -286,6 +300,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 	if (cli === 'claude') {
 		const modelArgs = options.model ? ['--model', options.model] : [];
 		if (options.sessionId) {
+			const promptArgs = options.prompt ? [options.prompt] : [];
 			return {
 				command: 'claude',
 				args: [
@@ -298,7 +313,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 					'acceptEdits',
 					'--output-format',
 					'stream-json',
-					options.prompt,
+					...promptArgs,
 				],
 			};
 		}
@@ -313,13 +328,14 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 				'acceptEdits',
 				'--output-format',
 				'stream-json',
-				options.prompt,
+				validatePrompt(options.prompt || ''),
 			],
 		};
 	}
 
 	const modelArgs = options.model ? ['--model', options.model] : [];
 	if (options.sessionId) {
+		const promptArgs = options.prompt ? [options.prompt] : [];
 		return {
 			command: 'codex',
 			args: [
@@ -329,14 +345,22 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 				'--skip-git-repo-check',
 				...modelArgs,
 				options.sessionId,
-				options.prompt,
+				...promptArgs,
 			],
 		};
 	}
 
 	return {
 		command: 'codex',
-		args: ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write', ...modelArgs, options.prompt],
+		args: [
+			'exec',
+			'--json',
+			'--skip-git-repo-check',
+			'--sandbox',
+			'workspace-write',
+			...modelArgs,
+			validatePrompt(options.prompt || ''),
+		],
 	};
 }
 
@@ -568,13 +592,13 @@ export async function createHeadlessCliSession(
 export async function resumeHeadlessCliSession(
 	cli: SupportedCli,
 	sessionId: string,
-	prompt: string,
+	prompt: string | undefined,
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
 ): Promise<HeadlessCliSession> {
 	try {
-		validatePrompt(prompt);
+		prompt = normalizeResumePrompt(prompt);
 		workingDir = validateWorkingDirectory(workingDir);
 		await ensureCliAvailable(cli, workingDir);
 
@@ -714,10 +738,12 @@ export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string,
 				return;
 			}
 
-			if (!prompt || typeof prompt !== 'string') {
-				socket.emit(`${eventPrefix}:error`, { error: 'Prompt is required and must be a string' });
+			if (prompt !== undefined && typeof prompt !== 'string') {
+				socket.emit(`${eventPrefix}:error`, { error: 'Prompt must be a string when provided' });
 				return;
 			}
+
+			const normalizedPrompt = normalizeResumePrompt(prompt);
 
 			if (data.model !== undefined && typeof data.model !== 'string') {
 				socket.emit(`${eventPrefix}:error`, { error: 'Model must be a string' });
@@ -743,7 +769,7 @@ export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string,
 			captureContext = startConduitSessionCapture(
 				cli,
 				{ agentId, workspaceId, pipelineId },
-				prompt,
+				normalizedPrompt,
 				data.model,
 				sessionId,
 				context,
@@ -754,7 +780,7 @@ export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string,
 				conduitSessionId: captureContext.conduitSessionId,
 			});
 
-			await resumeHeadlessCliSession(cli, sessionId, prompt, targetDir, data.model, (streamData) => {
+			await resumeHeadlessCliSession(cli, sessionId, normalizedPrompt, targetDir, data.model, (streamData) => {
 				emitSessionEvent(socket, eventPrefix, streamData);
 
 				if (captureContext) {
