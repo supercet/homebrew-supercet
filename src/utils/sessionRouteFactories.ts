@@ -31,6 +31,7 @@ interface ValidatedSessionRequest {
 }
 
 interface ValidatedCreateSessionRequest extends ValidatedSessionRequest {
+	isDangerous: boolean;
 	prompt: string;
 }
 
@@ -78,6 +79,18 @@ function readOptionalString(value: unknown, errorMessage: string): string | unde
 	}
 
 	if (typeof value !== 'string') {
+		throw new SessionRouteError(errorMessage, 400);
+	}
+
+	return value;
+}
+
+function readOptionalBoolean(value: unknown, errorMessage: string): boolean | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+
+	if (typeof value !== 'boolean') {
 		throw new SessionRouteError(errorMessage, 400);
 	}
 
@@ -156,6 +169,7 @@ function validateCreateSessionRequest(
 ): ValidatedCreateSessionRequest {
 	return {
 		...validateSharedSessionRequest(body, options),
+		isDangerous: readOptionalBoolean(body.isDangerous, 'isDangerous must be a boolean') ?? false,
 		prompt: readRequiredString(body.prompt, 'Prompt is required and must be a string'),
 	};
 }
@@ -239,6 +253,7 @@ export function createCreateSessionRoute(options: SessionRouteFactoryOptions) {
 					captureHandle?.handleStreamEvent(streamData);
 				},
 				captureHandle.conduitSessionId,
+				request.isDangerous,
 			);
 
 			return c.json(finalizeConduitSessionRun(request.cli, captureHandle, session));
