@@ -35,6 +35,7 @@ interface CliSessionOptions {
 	workingDir: string;
 	sessionId?: string;
 	conduitSessionId?: string;
+	isDangerous?: boolean;
 	model?: string;
 	streamCallback?: (data: StreamEvent) => void;
 }
@@ -44,6 +45,7 @@ interface SocketSessionPayload {
 	prompt?: string;
 	context?: string;
 	cli?: SupportedCli;
+	isDangerous?: boolean;
 	model?: string;
 	agentId: string;
 	workspaceId: string;
@@ -56,8 +58,6 @@ export interface ConduitSessionRequestMetadata {
 	pipelineId?: string;
 }
 
-// Maximum session timeout (10 minutes)
-const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const CLI_PRECHECK_TIMEOUT_MS = 5000;
 const SESSION_CANCEL_GRACE_PERIOD_MS = 5000;
 
@@ -641,6 +641,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 				...modelArgs,
 				'--permission-mode',
 				'acceptEdits',
+				...(options.isDangerous ? ['--dangerously-skip-permissions'] : []),
 				'--output-format',
 				'stream-json',
 				validatePrompt(options.prompt || ''),
@@ -663,6 +664,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 			'exec',
 			'--json',
 			'--skip-git-repo-check',
+			...(options.isDangerous ? ['--yolo'] : []),
 			'--sandbox',
 			'workspace-write',
 			...modelArgs,
@@ -774,25 +776,6 @@ function executeHeadlessCliSession(
 			streamCallback?.({ type: 'sessionId', content: options.sessionId });
 		}
 
-		let timeoutHandle: NodeJS.Timeout | null = null;
-		const clearSessionTimeout = () => {
-			if (timeoutHandle) {
-				clearTimeout(timeoutHandle);
-				timeoutHandle = null;
-			}
-		};
-
-		timeoutHandle = setTimeout(() => {
-			if (session.process && !session.process.killed) {
-				session.process.kill('SIGTERM');
-				const errorMsg = 'Session timed out after 10 minutes';
-				streamCallback?.({ type: 'error', content: errorMsg });
-				session.status = 'error';
-				reject(new Error(errorMsg));
-			}
-			timeoutHandle = null;
-		}, SESSION_TIMEOUT_MS);
-
 		const child = spawn(command.command, command.args, {
 			cwd: options.workingDir,
 			env: { ...process.env },
@@ -856,7 +839,6 @@ function executeHeadlessCliSession(
 		});
 
 		child.on('close', (code) => {
-			clearSessionTimeout();
 			unregisterActiveSession(activeSession);
 
 			if (stdoutBuffer.trim()) {
@@ -889,7 +871,6 @@ function executeHeadlessCliSession(
 		});
 
 		child.on('error', (error) => {
-			clearSessionTimeout();
 			unregisterActiveSession(activeSession);
 
 			if (activeSession.cancelRequested) {
@@ -917,6 +898,7 @@ export async function createHeadlessCliSession(
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
 	conduitSessionId?: string,
+	isDangerous = false,
 ): Promise<HeadlessCliSession> {
 	try {
 		validatePrompt(prompt);
@@ -930,7 +912,7 @@ export async function createHeadlessCliSession(
 
 	return executeHeadlessCliSession(
 		cli,
-		{ prompt, workingDir, model, streamCallback, conduitSessionId },
+		{ prompt, workingDir, model, streamCallback, conduitSessionId, isDangerous },
 		`Failed to start ${cli}`,
 	);
 }
@@ -1072,6 +1054,11 @@ export function handleHeadlessSessionCreate(socket: Socket, eventPrefix: string,
 				return;
 			}
 
+			if (data.isDangerous !== undefined && typeof data.isDangerous !== 'boolean') {
+				socket.emit(`${eventPrefix}:error`, { error: 'isDangerous must be a boolean' });
+				return;
+			}
+
 			validateConduitSessionRequestMetadata({ agentId, workspaceId, pipelineId });
 			const { workspace, error: workspaceError } = resolveReadyWorkspaceForNewWork(workspaceId);
 			if (!workspace || workspaceError) {
@@ -1114,6 +1101,7 @@ export function handleHeadlessSessionCreate(socket: Socket, eventPrefix: string,
 					}
 				},
 				captureContext.conduitSessionId,
+				data.isDangerous ?? false,
 			);
 
 			if (captureContext) {
