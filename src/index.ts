@@ -53,12 +53,16 @@ import {
 
 // Import Claude Code route handlers
 import { createSession } from './claude/createSession';
+import { cancelSession as cancelClaudeSessionRoute } from './claude/cancelSession';
 import { resumeSession } from './claude/resumeSession';
 import { createCodexSessionRoute } from './codex/createSession';
+import { cancelCodexSessionRoute } from './codex/cancelSession';
 import { resumeCodexSessionRoute } from './codex/resumeSession';
 import {
+	handleClaudeSessionCancel,
 	handleClaudeSessionCreate,
 	handleClaudeSessionResume,
+	handleCodexSessionCancel,
 	handleCodexSessionCreate,
 	handleCodexSessionResume,
 } from './utils/claudeCodeHelpers';
@@ -721,8 +725,10 @@ app.post('/api/file/write', writeFile);
 // Claude Code session routes
 app.post('/api/claude/session', createSession);
 app.post('/api/claude/session/:sessionId/resume', resumeSession);
+app.post('/api/claude/session/:sessionId/cancel', cancelClaudeSessionRoute);
 app.post('/api/codex/session', createCodexSessionRoute);
 app.post('/api/codex/session/:sessionId/resume', resumeCodexSessionRoute);
+app.post('/api/codex/session/:sessionId/cancel', cancelCodexSessionRoute);
 
 // Heartbeat route
 app.get('/api/heartbeat', (c) => {
@@ -1602,8 +1608,10 @@ async function startServer() {
 		// Handle Claude Code session creation and resumption
 		handleClaudeSessionCreate(socket);
 		handleClaudeSessionResume(socket);
+		handleClaudeSessionCancel(socket);
 		handleCodexSessionCreate(socket);
 		handleCodexSessionResume(socket);
+		handleCodexSessionCancel(socket);
 
 		let ptyProcess: ReturnType<typeof spawnLoginShell> | null = null;
 

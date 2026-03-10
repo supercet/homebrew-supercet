@@ -2,6 +2,7 @@ import { Context } from 'hono';
 import {
 	beginConduitSessionCapture,
 	createHeadlessCliSession,
+	finalizeConduitSessionRun,
 	validateConduitSessionRequestMetadata,
 	type ConduitSessionCaptureHandle,
 } from '../utils/headlessCliHelpers';
@@ -57,20 +58,17 @@ export async function createCodexSessionRoute(c: Context) {
 			undefined,
 			context,
 		);
-		const session = await createHeadlessCliSession('codex', prompt, workspace.path, model, (streamData) => {
-			captureHandle?.handleStreamEvent(streamData);
-		});
-		captureHandle.complete();
-
-		return c.json({
-			success: true,
-			cli: 'codex',
-			conduitSessionId: captureHandle.conduitSessionId,
-			sessionId: session.sessionId,
-			status: session.status,
-			output: session.output,
-			error: session.error.length > 0 ? session.error : undefined,
-		});
+		const session = await createHeadlessCliSession(
+			'codex',
+			prompt,
+			workspace.path,
+			model,
+			(streamData) => {
+				captureHandle?.handleStreamEvent(streamData);
+			},
+			captureHandle.conduitSessionId,
+		);
+		return c.json(finalizeConduitSessionRun('codex', captureHandle, session));
 	} catch (error) {
 		if (captureHandle) {
 			const message = error instanceof Error ? error.message : 'Unknown error occurred';

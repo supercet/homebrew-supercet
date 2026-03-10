@@ -1,6 +1,8 @@
 import { Socket } from 'socket.io';
 import {
+	cancelHeadlessCliSession,
 	createHeadlessCliSession,
+	handleHeadlessSessionCancel,
 	handleHeadlessSessionCreate,
 	handleHeadlessSessionResume,
 	HeadlessCliSession,
@@ -14,7 +16,7 @@ export async function createClaudeCodeSession(
 	prompt: string,
 	workingDir: string,
 	streamCallback?: (data: {
-		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error';
+		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error' | 'cancelled';
 		content: string;
 	}) => void,
 	model?: string,
@@ -27,7 +29,7 @@ export async function resumeClaudeCodeSession(
 	prompt: string | undefined,
 	workingDir: string,
 	streamCallback?: (data: {
-		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error';
+		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error' | 'cancelled';
 		content: string;
 	}) => void,
 	model?: string,
@@ -43,11 +45,19 @@ export function handleClaudeSessionResume(socket: Socket) {
 	handleHeadlessSessionResume(socket, 'claude:session', 'claude');
 }
 
+export function handleClaudeSessionCancel(socket: Socket) {
+	handleHeadlessSessionCancel(socket, 'claude:session', 'claude');
+}
+
+export function cancelClaudeCodeSession(sessionId?: string, conduitSessionId?: string) {
+	return cancelHeadlessCliSession({ cli: 'claude', sessionId, conduitSessionId });
+}
+
 export async function createCodexSession(
 	prompt: string,
 	workingDir: string,
 	streamCallback?: (data: {
-		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error';
+		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error' | 'cancelled';
 		content: string;
 	}) => void,
 	model?: string,
@@ -60,7 +70,7 @@ export async function resumeCodexSession(
 	prompt: string | undefined,
 	workingDir: string,
 	streamCallback?: (data: {
-		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error';
+		type: 'stdout' | 'stderr' | 'sessionId' | 'complete' | 'error' | 'cancelled';
 		content: string;
 	}) => void,
 	model?: string,
@@ -74,4 +84,12 @@ export function handleCodexSessionCreate(socket: Socket) {
 
 export function handleCodexSessionResume(socket: Socket) {
 	handleHeadlessSessionResume(socket, 'codex:session', 'codex');
+}
+
+export function handleCodexSessionCancel(socket: Socket) {
+	handleHeadlessSessionCancel(socket, 'codex:session', 'codex');
+}
+
+export function cancelCodexSession(sessionId?: string, conduitSessionId?: string) {
+	return cancelHeadlessCliSession({ cli: 'codex', sessionId, conduitSessionId });
 }

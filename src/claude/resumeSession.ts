@@ -1,9 +1,11 @@
 import { Context } from 'hono';
 import {
 	beginConduitSessionCapture,
+	finalizeConduitSessionRun,
 	isValidUUID,
 	resolveSupportedCli,
-	resumeHeadlessCliSession,
+	resolveResumeSessionTarget,
+	resumeHeadlessCliSessionWithFallback,
 	validateConduitSessionRequestMetadata,
 	type ConduitSessionCaptureHandle,
 } from '../utils/headlessCliHelpers';
@@ -68,28 +70,34 @@ export async function resumeSession(c: Context) {
 			return c.json({ error: error instanceof Error ? error.message : 'Invalid cli' }, 400);
 		}
 
+		let resumeTarget: ReturnType<typeof resolveResumeSessionTarget>;
+		try {
+			resumeTarget = resolveResumeSessionTarget(cli, sessionId);
+		} catch (error) {
+			return c.json({ error: error instanceof Error ? error.message : 'Invalid session ID' }, 400);
+		}
+
 		captureHandle = beginConduitSessionCapture(
 			cli,
 			{ agentId, workspaceId, pipelineId },
 			prompt,
 			model,
-			sessionId,
+			resumeTarget.providerSessionId || undefined,
 			context,
+			resumeTarget.conduitSessionId || undefined,
 		);
-		const session = await resumeHeadlessCliSession(cli, sessionId, prompt, workspace.path, model, (streamData) => {
-			captureHandle?.handleStreamEvent(streamData);
-		});
-		captureHandle.complete();
-
-		return c.json({
-			success: true,
+		const session = await resumeHeadlessCliSessionWithFallback(
 			cli,
-			conduitSessionId: captureHandle.conduitSessionId,
-			sessionId: session.sessionId,
-			status: session.status,
-			output: session.output,
-			error: session.error.length > 0 ? session.error : undefined,
-		});
+			resumeTarget,
+			prompt,
+			workspace.path,
+			model,
+			(streamData) => {
+				captureHandle?.handleStreamEvent(streamData);
+			},
+			captureHandle.conduitSessionId,
+		);
+		return c.json(finalizeConduitSessionRun(cli, captureHandle, session));
 	} catch (error) {
 		if (captureHandle) {
 			const message = error instanceof Error ? error.message : 'Unknown error occurred';
