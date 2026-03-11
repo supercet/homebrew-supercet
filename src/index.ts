@@ -34,7 +34,7 @@ import { getSymbolicRef } from './git/symbolicRef';
 import { getFile } from './file/get';
 import { writeFile } from './file/write';
 import { getDbHealth } from './db/health';
-import { getConduitSession, getConduitSessions } from './db/sessions';
+import { getSession, getSessions } from './db/sessions';
 import {
 	activateConduitWorkspace,
 	appendConduitWorkspaceEvent,
@@ -51,21 +51,16 @@ import {
 	upsertConduitWorkspace,
 } from './db/sqlite';
 
-// Import Claude Code route handlers
-import { createSession } from './claude/createSession';
-import { cancelSession as cancelClaudeSessionRoute } from './claude/cancelSession';
-import { resumeSession } from './claude/resumeSession';
-import { createCodexSessionRoute } from './codex/createSession';
-import { cancelCodexSessionRoute } from './codex/cancelSession';
-import { resumeCodexSessionRoute } from './codex/resumeSession';
 import {
-	handleClaudeSessionCancel,
-	handleClaudeSessionCreate,
-	handleClaudeSessionResume,
-	handleCodexSessionCancel,
-	handleCodexSessionCreate,
-	handleCodexSessionResume,
-} from './utils/claudeCodeHelpers';
+	handleUnifiedSessionCancel,
+	handleUnifiedSessionCreate,
+	handleUnifiedSessionResume,
+} from './utils/headlessCliHelpers';
+import {
+	createUnifiedCancelSessionRoute,
+	createUnifiedCreateSessionRoute,
+	createUnifiedResumeSessionRoute,
+} from './utils/sessionRouteFactories';
 import { registerWorktreeSocketHandlers } from './workspace/worktreeSocketHandlers';
 
 const PORT = 4444;
@@ -136,6 +131,9 @@ let activeWorkspaceId: string | null = null;
 const app = new Hono();
 const execFileAsync = promisify(execFile);
 let hasEnsuredNodePtySpawnHelperExecutable = false;
+const createSessionRoute = createUnifiedCreateSessionRoute();
+const resumeSessionRoute = createUnifiedResumeSessionRoute();
+const cancelSessionRoute = createUnifiedCancelSessionRoute();
 
 function normalizeCommandOutput(value: unknown): string {
 	if (typeof value === 'string') {
@@ -722,13 +720,10 @@ app.get('/api/git/symbolic-ref', getSymbolicRef);
 app.get('/api/file/get', getFile);
 app.post('/api/file/write', writeFile);
 
-// Claude Code session routes
-app.post('/api/claude/session', createSession);
-app.post('/api/claude/session/:sessionId/resume', resumeSession);
-app.post('/api/claude/session/:sessionId/cancel', cancelClaudeSessionRoute);
-app.post('/api/codex/session', createCodexSessionRoute);
-app.post('/api/codex/session/:sessionId/resume', resumeCodexSessionRoute);
-app.post('/api/codex/session/:sessionId/cancel', cancelCodexSessionRoute);
+// Session routes
+app.post('/api/session', createSessionRoute);
+app.post('/api/session/:sessionId/resume', resumeSessionRoute);
+app.post('/api/session/:sessionId/cancel', cancelSessionRoute);
 
 // Heartbeat route
 app.get('/api/heartbeat', (c) => {
@@ -737,8 +732,8 @@ app.get('/api/heartbeat', (c) => {
 
 // SQLite routes
 app.get('/api/db/health', getDbHealth);
-app.get('/api/conduit/sessions', getConduitSessions);
-app.get('/api/conduit/sessions/:conduitSessionId', getConduitSession);
+app.get('/api/sessions', getSessions);
+app.get('/api/sessions/:sessionId', getSession);
 
 // Workspace routes
 app.get('/api/workspaces', (c) => {
@@ -1605,13 +1600,10 @@ async function startServer() {
 			socket.emit('file:write:update', { workspaceId: workspace.id, ...result });
 		});
 
-		// Handle Claude Code session creation and resumption
-		handleClaudeSessionCreate(socket);
-		handleClaudeSessionResume(socket);
-		handleClaudeSessionCancel(socket);
-		handleCodexSessionCreate(socket);
-		handleCodexSessionResume(socket);
-		handleCodexSessionCancel(socket);
+		// Handle unified session lifecycle events
+		handleUnifiedSessionCreate(socket);
+		handleUnifiedSessionResume(socket);
+		handleUnifiedSessionCancel(socket);
 
 		let ptyProcess: ReturnType<typeof spawnLoginShell> | null = null;
 

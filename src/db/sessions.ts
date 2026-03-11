@@ -35,13 +35,12 @@ function isValidUUID(value: string): boolean {
 	return UUID_PATTERN.test(value);
 }
 
-export async function getConduitSessions(c: Context) {
+export async function getSessions(c: Context) {
 	try {
 		const agentId = c.req.query('agentId');
 		const pipelineId = c.req.query('pipelineId');
 		const workspaceId = c.req.query('workspaceId');
 		const provider = c.req.query('provider');
-		const providerSessionId = c.req.query('providerSessionId');
 		const status = c.req.query('status');
 		const limit = parseIntegerQuery(c.req.query('limit'), 50);
 		const offset = parseIntegerQuery(c.req.query('offset'), 0);
@@ -52,10 +51,6 @@ export async function getConduitSessions(c: Context) {
 
 		if (pipelineId && !isValidUUID(pipelineId)) {
 			return c.json({ success: false, error: 'Invalid pipelineId format (must be a valid UUID)' }, 400);
-		}
-
-		if (providerSessionId && !isValidUUID(providerSessionId)) {
-			return c.json({ success: false, error: 'Invalid providerSessionId format (must be a valid UUID)' }, 400);
 		}
 
 		if (provider && !VALID_PROVIDERS.includes(provider as ConduitProvider)) {
@@ -79,16 +74,16 @@ export async function getConduitSessions(c: Context) {
 			pipelineId: pipelineId || undefined,
 			workspaceId: workspaceId || undefined,
 			provider: provider as ConduitProvider | undefined,
-			providerSessionId: providerSessionId || undefined,
 			status: status as ConduitSessionStatus | undefined,
 			limit,
 			offset,
 		});
+		const sessions = data.sessions.map(({ providerSessionId: _providerSessionId, ...session }) => session);
 
 		return c.json(
 			{
 				success: true,
-				data: data.sessions,
+				data: sessions,
 				pagination: {
 					total: data.total,
 					limit: data.limit,
@@ -98,7 +93,7 @@ export async function getConduitSessions(c: Context) {
 			200,
 		);
 	} catch (error) {
-		console.error('Failed to read conduit sessions:', error);
+		console.error('Failed to read sessions:', error);
 		return c.json(
 			{
 				success: false,
@@ -109,26 +104,39 @@ export async function getConduitSessions(c: Context) {
 	}
 }
 
-export async function getConduitSession(c: Context) {
+export async function getSession(c: Context) {
 	try {
-		const conduitSessionId = c.req.param('conduitSessionId');
-		if (!conduitSessionId || typeof conduitSessionId !== 'string') {
-			return c.json({ success: false, error: 'conduitSessionId is required' }, 400);
+		const sessionId = c.req.param('sessionId');
+		if (!sessionId || typeof sessionId !== 'string') {
+			return c.json({ success: false, error: 'sessionId is required' }, 400);
 		}
 
-		if (!isValidUUID(conduitSessionId)) {
-			return c.json({ success: false, error: 'Invalid conduitSessionId format (must be a valid UUID)' }, 400);
+		if (!isValidUUID(sessionId)) {
+			return c.json({ success: false, error: 'Invalid sessionId format (must be a valid UUID)' }, 400);
 		}
 
-		const session = getConduitSessionById(conduitSessionId);
+		const session = getConduitSessionById(sessionId);
 		if (!session) {
-			return c.json({ success: false, error: 'Conduit session not found' }, 404);
+			return c.json({ success: false, error: 'Session not found' }, 404);
 		}
 
-		const events = getConduitSessionEvents(conduitSessionId);
-		return c.json({ success: true, data: { session, events } }, 200);
+		const events = getConduitSessionEvents(sessionId);
+		const { providerSessionId: _providerSessionId, ...publicSession } = session;
+		const publicEvents = events
+			.filter((event) => event.eventType !== 'sessionId')
+			.map(({ sessionId: _eventSessionId, ...event }) => event);
+		return c.json(
+			{
+				success: true,
+				data: {
+					session: publicSession,
+					events: publicEvents,
+				},
+			},
+			200,
+		);
 	} catch (error) {
-		console.error('Failed to read conduit session:', error);
+		console.error('Failed to read session:', error);
 		return c.json(
 			{
 				success: false,

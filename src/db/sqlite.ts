@@ -69,11 +69,11 @@ interface ConduitWorkspaceRow {
 }
 
 interface ConduitSessionIdRow {
-	conduit_session_id: string;
+	session_id: string;
 }
 
 interface ConduitSessionRow {
-	conduit_session_id: string;
+	session_id: string;
 	provider_session_id: string | null;
 	provider: ConduitProvider;
 	agent_id: string;
@@ -92,7 +92,7 @@ interface ConduitSessionWithWorkspaceRow extends ConduitSessionRow {
 }
 
 interface ConduitSessionEventRow {
-	conduit_session_id: string;
+	session_id: string;
 	seq: number;
 	event_type: ConduitSessionEventType;
 	role: ConduitSessionEventRole;
@@ -158,7 +158,7 @@ export type ConduitSessionEventType =
 export type ConduitSessionEventRole = 'client' | 'assistant' | 'system' | 'event';
 
 export interface CreateConduitSessionInput {
-	conduitSessionId: string;
+	sessionId: string;
 	providerSessionId?: string | null;
 	provider: ConduitProvider;
 	agentId: string;
@@ -169,7 +169,7 @@ export interface CreateConduitSessionInput {
 }
 
 export interface ConduitSessionRecord {
-	conduitSessionId: string;
+	sessionId: string;
 	providerSessionId: string | null;
 	provider: ConduitProvider;
 	agentId: string;
@@ -185,7 +185,7 @@ export interface ConduitSessionRecord {
 }
 
 export interface ConduitSessionEventRecord {
-	conduitSessionId: string;
+	sessionId: string;
 	seq: number;
 	eventType: ConduitSessionEventType;
 	role: ConduitSessionEventRole;
@@ -227,7 +227,7 @@ export interface UpsertConduitWorkspaceInput {
 
 let sqliteDb: SQLiteDatabase | null = null;
 let sqliteDbPath: string | null = null;
-const LATEST_SCHEMA_VERSION = 2;
+const LATEST_SCHEMA_VERSION = 3;
 const REQUIRED_TABLES = [
 	'db_health_checks',
 	'conduit_workspaces',
@@ -300,7 +300,7 @@ function applySchemaV1(db: SQLiteDatabase) {
 			WHERE is_active = 1;
 
 		CREATE TABLE IF NOT EXISTS conduit_sessions (
-			conduit_session_id TEXT PRIMARY KEY,
+			session_id TEXT PRIMARY KEY,
 			provider_session_id TEXT,
 			provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')),
 			agent_id TEXT NOT NULL,
@@ -330,14 +330,14 @@ function applySchemaV1(db: SQLiteDatabase) {
 			ON conduit_sessions(provider_session_id);
 
 		CREATE TABLE IF NOT EXISTS conduit_session_events (
-			conduit_session_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
 			seq INTEGER NOT NULL CHECK (seq >= 1),
 			event_type TEXT NOT NULL CHECK (event_type IN ('prompt', 'context', 'stdout', 'stderr', 'sessionId', 'complete', 'error', 'status')),
 			role TEXT NOT NULL CHECK (role IN ('client', 'assistant', 'system', 'event')),
 			content TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			PRIMARY KEY (conduit_session_id, seq),
-			FOREIGN KEY (conduit_session_id) REFERENCES conduit_sessions(conduit_session_id)
+			PRIMARY KEY (session_id, seq),
+			FOREIGN KEY (session_id) REFERENCES conduit_sessions(session_id)
 				ON UPDATE CASCADE
 				ON DELETE CASCADE
 		) WITHOUT ROWID;
@@ -428,6 +428,31 @@ function applySchemaV2(db: SQLiteDatabase) {
 	`);
 }
 
+function applySchemaV3(db: SQLiteDatabase) {
+	if (
+		columnExists(db, 'conduit_sessions', 'conduit_session_id') &&
+		!columnExists(db, 'conduit_sessions', 'session_id')
+	) {
+		db.exec('ALTER TABLE conduit_sessions RENAME COLUMN conduit_session_id TO session_id');
+	}
+
+	if (
+		columnExists(db, 'conduit_session_events', 'conduit_session_id') &&
+		!columnExists(db, 'conduit_session_events', 'session_id')
+	) {
+		db.exec('ALTER TABLE conduit_session_events RENAME COLUMN conduit_session_id TO session_id');
+	}
+}
+
+function needsSessionIdSchemaRepair(db: SQLiteDatabase): boolean {
+	return (
+		(columnExists(db, 'conduit_sessions', 'conduit_session_id') &&
+			!columnExists(db, 'conduit_sessions', 'session_id')) ||
+		(columnExists(db, 'conduit_session_events', 'conduit_session_id') &&
+			!columnExists(db, 'conduit_session_events', 'session_id'))
+	);
+}
+
 function tableExists(db: SQLiteDatabase, tableName: string): boolean {
 	const row = db
 		.prepare<SQLiteTableRow>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -461,6 +486,10 @@ function runSchemaMigrations(db: SQLiteDatabase): void {
 			applySchemaV2(db);
 			setSchemaVersion(db, 2);
 		}
+		if (currentVersion < 3) {
+			applySchemaV3(db);
+			setSchemaVersion(db, 3);
+		}
 		db.exec('COMMIT');
 	} catch (error) {
 		db.exec('ROLLBACK');
@@ -474,9 +503,25 @@ function runSchemaMigrations(db: SQLiteDatabase): void {
 		try {
 			applySchemaV1(db);
 			applySchemaV2(db);
+			applySchemaV3(db);
 			const currentVersion = getSchemaVersion(db);
 			if (currentVersion < LATEST_SCHEMA_VERSION) {
 				setSchemaVersion(db, LATEST_SCHEMA_VERSION);
+			}
+			db.exec('COMMIT');
+		} catch (error) {
+			db.exec('ROLLBACK');
+			throw error;
+		}
+	}
+
+	if (needsSessionIdSchemaRepair(db)) {
+		db.exec('BEGIN IMMEDIATE');
+		try {
+			applySchemaV3(db);
+			const currentVersion = getSchemaVersion(db);
+			if (currentVersion < 3) {
+				setSchemaVersion(db, 3);
 			}
 			db.exec('COMMIT');
 		} catch (error) {
@@ -625,7 +670,7 @@ function mapConduitWorkspaceRow(row: ConduitWorkspaceRow): ConduitWorkspaceRecor
 
 function mapConduitSessionRow(row: ConduitSessionWithWorkspaceRow): ConduitSessionRecord {
 	return {
-		conduitSessionId: row.conduit_session_id,
+		sessionId: row.session_id,
 		providerSessionId: row.provider_session_id,
 		provider: row.provider,
 		agentId: row.agent_id,
@@ -643,7 +688,7 @@ function mapConduitSessionRow(row: ConduitSessionWithWorkspaceRow): ConduitSessi
 
 function mapConduitSessionEventRow(row: ConduitSessionEventRow): ConduitSessionEventRecord {
 	return {
-		conduitSessionId: row.conduit_session_id,
+		sessionId: row.session_id,
 		seq: row.seq,
 		eventType: row.event_type,
 		role: row.role,
@@ -934,7 +979,7 @@ export function findLatestConduitSessionIdByProviderSession(
 	const row = db
 		.prepare<ConduitSessionIdRow>(
 			`
-				SELECT conduit_session_id
+				SELECT session_id
 				FROM conduit_sessions
 				WHERE provider = ? AND provider_session_id = ?
 				ORDER BY updated_at DESC, created_at DESC
@@ -943,7 +988,7 @@ export function findLatestConduitSessionIdByProviderSession(
 		)
 		.get(provider, providerSessionId);
 
-	return row?.conduit_session_id || null;
+	return row?.session_id || null;
 }
 
 export function createConduitSession(input: CreateConduitSessionInput): void {
@@ -952,7 +997,7 @@ export function createConduitSession(input: CreateConduitSessionInput): void {
 	db.prepare(
 		`
 			INSERT INTO conduit_sessions (
-				conduit_session_id,
+				session_id,
 				provider_session_id,
 				provider,
 				agent_id,
@@ -968,7 +1013,7 @@ export function createConduitSession(input: CreateConduitSessionInput): void {
 			)
 		`,
 	).run(
-		input.conduitSessionId,
+		input.sessionId,
 		input.providerSessionId || null,
 		input.provider,
 		input.agentId,
@@ -980,8 +1025,8 @@ export function createConduitSession(input: CreateConduitSessionInput): void {
 }
 
 export function updateConduitSessionForRun(
-	conduitSessionId: string,
-	input: Omit<CreateConduitSessionInput, 'conduitSessionId'>,
+	sessionId: string,
+	input: Omit<CreateConduitSessionInput, 'sessionId'>,
 ): void {
 	const db = getDatabase();
 	const result = db
@@ -999,7 +1044,7 @@ export function updateConduitSessionForRun(
 					started_at = datetime('now'),
 					ended_at = NULL,
 					updated_at = datetime('now')
-				WHERE conduit_session_id = ?
+				WHERE session_id = ?
 			`,
 		)
 		.run(
@@ -1010,32 +1055,32 @@ export function updateConduitSessionForRun(
 			input.workspaceId,
 			input.model || null,
 			input.status,
-			conduitSessionId,
+			sessionId,
 		);
 
 	if (normalizeChanges(result) === 0) {
-		throw new Error(`Conduit session '${conduitSessionId}' was not found`);
+		throw new Error(`Conduit session '${sessionId}' was not found`);
 	}
 }
 
-export function setConduitSessionProviderSessionId(conduitSessionId: string, providerSessionId: string): void {
+export function setConduitSessionProviderSessionId(sessionId: string, providerSessionId: string): void {
 	const db = getDatabase();
 	const result = db
 		.prepare(
 			`
 				UPDATE conduit_sessions
 				SET provider_session_id = ?, updated_at = datetime('now')
-				WHERE conduit_session_id = ?
+				WHERE session_id = ?
 			`,
 		)
-		.run(providerSessionId, conduitSessionId);
+		.run(providerSessionId, sessionId);
 
 	if (normalizeChanges(result) === 0) {
-		throw new Error(`Conduit session '${conduitSessionId}' was not found`);
+		throw new Error(`Conduit session '${sessionId}' was not found`);
 	}
 }
 
-export function setConduitSessionStatus(conduitSessionId: string, status: ConduitSessionStatus): void {
+export function setConduitSessionStatus(sessionId: string, status: ConduitSessionStatus): void {
 	const db = getDatabase();
 	const endedAtClause = status === 'running' || status === 'created' ? 'NULL' : "datetime('now')";
 	const result = db
@@ -1046,13 +1091,13 @@ export function setConduitSessionStatus(conduitSessionId: string, status: Condui
 					status = ?,
 					ended_at = ${endedAtClause},
 					updated_at = datetime('now')
-				WHERE conduit_session_id = ?
+				WHERE session_id = ?
 			`,
 		)
-		.run(status, conduitSessionId);
+		.run(status, sessionId);
 
 	if (normalizeChanges(result) === 0) {
-		throw new Error(`Conduit session '${conduitSessionId}' was not found`);
+		throw new Error(`Conduit session '${sessionId}' was not found`);
 	}
 }
 
@@ -1064,7 +1109,7 @@ export function reconcileRunningConduitSessionsOnStartup(): ReconcileRunningCond
 		const runningSessionRows = db
 			.prepare<ConduitSessionIdRow>(
 				`
-					SELECT conduit_session_id
+					SELECT session_id
 					FROM conduit_sessions
 					WHERE status = 'running'
 					ORDER BY created_at ASC
@@ -1095,11 +1140,11 @@ export function reconcileRunningConduitSessionsOnStartup(): ReconcileRunningCond
 
 		const appendStatusEventStatement = db.prepare(
 			`
-				INSERT INTO conduit_session_events (conduit_session_id, seq, event_type, role, content)
+				INSERT INTO conduit_session_events (session_id, seq, event_type, role, content)
 				VALUES (
 					?,
 					COALESCE(
-						(SELECT MAX(seq) + 1 FROM conduit_session_events WHERE conduit_session_id = ?),
+						(SELECT MAX(seq) + 1 FROM conduit_session_events WHERE session_id = ?),
 						1
 					),
 					'status',
@@ -1110,13 +1155,13 @@ export function reconcileRunningConduitSessionsOnStartup(): ReconcileRunningCond
 		);
 
 		for (const row of runningSessionRows) {
-			appendStatusEventStatement.run(row.conduit_session_id, row.conduit_session_id);
+			appendStatusEventStatement.run(row.session_id, row.session_id);
 		}
 
 		db.exec('COMMIT');
 		return {
 			cancelledCount: normalizeChanges(updateResult),
-			cancelledSessionIds: runningSessionRows.map((row) => row.conduit_session_id),
+			cancelledSessionIds: runningSessionRows.map((row) => row.session_id),
 		};
 	} catch (error) {
 		db.exec('ROLLBACK');
@@ -1125,7 +1170,7 @@ export function reconcileRunningConduitSessionsOnStartup(): ReconcileRunningCond
 }
 
 export function appendConduitSessionEvent(
-	conduitSessionId: string,
+	sessionId: string,
 	eventType: ConduitSessionEventType,
 	role: ConduitSessionEventRole,
 	content: string,
@@ -1134,11 +1179,11 @@ export function appendConduitSessionEvent(
 	const result = db
 		.prepare(
 			`
-				INSERT INTO conduit_session_events (conduit_session_id, seq, event_type, role, content)
+				INSERT INTO conduit_session_events (session_id, seq, event_type, role, content)
 				VALUES (
 					?,
 					COALESCE(
-						(SELECT MAX(seq) + 1 FROM conduit_session_events WHERE conduit_session_id = ?),
+						(SELECT MAX(seq) + 1 FROM conduit_session_events WHERE session_id = ?),
 						1
 					),
 					?,
@@ -1147,10 +1192,10 @@ export function appendConduitSessionEvent(
 				)
 			`,
 		)
-		.run(conduitSessionId, conduitSessionId, eventType, role, content);
+		.run(sessionId, sessionId, eventType, role, content);
 
 	if (normalizeChanges(result) === 0) {
-		throw new Error(`Failed to append event for conduit session '${conduitSessionId}'`);
+		throw new Error(`Failed to append event for conduit session '${sessionId}'`);
 	}
 }
 
@@ -1202,7 +1247,7 @@ export function listConduitSessions(filters: ListConduitSessionsFilters = {}): L
 		.prepare<ConduitSessionWithWorkspaceRow>(
 			`
 				SELECT
-					s.conduit_session_id,
+					s.session_id,
 					s.provider_session_id,
 					s.provider,
 					s.agent_id,
@@ -1233,13 +1278,13 @@ export function listConduitSessions(filters: ListConduitSessionsFilters = {}): L
 	};
 }
 
-export function getConduitSessionById(conduitSessionId: string): ConduitSessionRecord | null {
+export function getConduitSessionById(sessionId: string): ConduitSessionRecord | null {
 	const db = getDatabase();
 	const row = db
 		.prepare<ConduitSessionWithWorkspaceRow>(
 			`
 				SELECT
-					s.conduit_session_id,
+					s.session_id,
 					s.provider_session_id,
 					s.provider,
 					s.agent_id,
@@ -1255,26 +1300,26 @@ export function getConduitSessionById(conduitSessionId: string): ConduitSessionR
 				FROM conduit_sessions s
 				LEFT JOIN conduit_workspaces w
 					ON w.id = s.workspace_id
-				WHERE s.conduit_session_id = ?
+				WHERE s.session_id = ?
 			`,
 		)
-		.get(conduitSessionId);
+		.get(sessionId);
 
 	return row ? mapConduitSessionRow(row) : null;
 }
 
-export function getConduitSessionEvents(conduitSessionId: string): ConduitSessionEventRecord[] {
+export function getConduitSessionEvents(sessionId: string): ConduitSessionEventRecord[] {
 	const db = getDatabase();
 	const rows = db
 		.prepare<ConduitSessionEventRow>(
 			`
-				SELECT conduit_session_id, seq, event_type, role, content, created_at
+				SELECT session_id, seq, event_type, role, content, created_at
 				FROM conduit_session_events
-				WHERE conduit_session_id = ?
+				WHERE session_id = ?
 				ORDER BY seq ASC
 			`,
 		)
-		.all(conduitSessionId);
+		.all(sessionId);
 
 	return rows.map(mapConduitSessionEventRow);
 }

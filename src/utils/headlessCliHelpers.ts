@@ -8,7 +8,6 @@ import {
 	createConduitSession,
 	findLatestConduitSessionIdByProviderSession,
 	getConduitSessionById,
-	listConduitSessions,
 	setConduitSessionProviderSessionId,
 	setConduitSessionStatus,
 	updateConduitSessionForRun,
@@ -18,7 +17,7 @@ import { resolveReadyWorkspaceForNewWork } from './workspaceReadiness';
 export type SupportedCli = 'claude' | 'codex';
 
 export interface HeadlessCliSession {
-	sessionId: string | null;
+	providerSessionId: string | null;
 	process: ReturnType<typeof spawn> | null;
 	output: string[];
 	error: string[];
@@ -33,18 +32,16 @@ export interface StreamEvent {
 interface CliSessionOptions {
 	prompt?: string;
 	workingDir: string;
+	providerSessionId?: string;
 	sessionId?: string;
-	conduitSessionId?: string;
 	isDangerous?: boolean;
 	model?: string;
 	streamCallback?: (data: StreamEvent) => void;
 }
 
 interface SocketSessionPayload {
-	sessionId?: string;
 	prompt?: string;
 	context?: string;
-	cli?: SupportedCli;
 	isDangerous?: boolean;
 	model?: string;
 	agentId: string;
@@ -66,12 +63,12 @@ const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const cliAvailabilityCache = new Set<SupportedCli>();
 
 interface ConduitCaptureContext {
-	conduitSessionId: string;
+	sessionId: string;
 }
 
 interface ActiveHeadlessCliSession {
 	cli: SupportedCli;
-	conduitSessionId: string | null;
+	sessionId: string | null;
 	providerSessionId: string | null;
 	process: ReturnType<typeof spawn>;
 	cancelRequested: boolean;
@@ -81,34 +78,45 @@ interface ActiveHeadlessCliSession {
 
 export interface CancelHeadlessCliSessionInput {
 	cli?: SupportedCli;
-	conduitSessionId?: string;
 	sessionId?: string;
+	providerSessionId?: string;
 }
 
 export interface CancelHeadlessCliSessionResult {
 	cli: SupportedCli;
-	conduitSessionId: string | null;
 	sessionId: string | null;
+	providerSessionId: string | null;
 	status: 'cancelled';
 }
 
 export interface ResolvedResumeSessionTarget {
 	providerSessionId: string | null;
-	conduitSessionId: string | null;
+	sessionId: string | null;
+}
+
+export interface ResolvedConduitSession {
+	cli: SupportedCli;
+	sessionId: string;
+	providerSessionId: string | null;
 }
 
 export interface HeadlessSessionRunSuccessPayload {
 	success: true;
-	cli: SupportedCli;
-	conduitSessionId: string;
-	sessionId: string | null;
+	provider: SupportedCli;
+	sessionId: string;
 	status: HeadlessCliSession['status'];
 	output: string[];
 	error?: string[];
 }
 
-const activeSessionsByConduitId = new Map<string, ActiveHeadlessCliSession>();
+const activeSessionsBySessionId = new Map<string, ActiveHeadlessCliSession>();
 const activeSessionsByProviderId = new Map<string, ActiveHeadlessCliSession>();
+
+function assertNoActiveRunForSession(sessionId: string): void {
+	if (activeSessionsBySessionId.has(sessionId)) {
+		throw new Error(`Session '${sessionId}' already has an active run`);
+	}
+}
 
 function mapStreamEventRole(type: StreamEvent['type']): 'assistant' | 'event' {
 	if (type === 'stdout') {
@@ -148,18 +156,22 @@ function startConduitSessionCapture(
 	model?: string,
 	providerSessionId?: string,
 	context?: string,
-	preferredConduitSessionId?: string,
+	preferredSessionId?: string,
 ): ConduitCaptureContext {
-	const existingConduitSessionId =
-		preferredConduitSessionId ||
+	const existingSessionId =
+		preferredSessionId ||
 		(providerSessionId && isValidUUID(providerSessionId)
 			? findLatestConduitSessionIdByProviderSession(cli, providerSessionId)
 			: null);
 
-	const conduitSessionId = existingConduitSessionId || randomUUID();
+	const sessionId = existingSessionId || randomUUID();
 
-	if (existingConduitSessionId) {
-		updateConduitSessionForRun(conduitSessionId, {
+	if (existingSessionId) {
+		assertNoActiveRunForSession(sessionId);
+	}
+
+	if (existingSessionId) {
+		updateConduitSessionForRun(sessionId, {
 			providerSessionId: providerSessionId || null,
 			provider: cli,
 			agentId: metadata.agentId,
@@ -170,7 +182,7 @@ function startConduitSessionCapture(
 		});
 	} else {
 		createConduitSession({
-			conduitSessionId,
+			sessionId,
 			providerSessionId: providerSessionId || null,
 			provider: cli,
 			agentId: metadata.agentId,
@@ -182,14 +194,14 @@ function startConduitSessionCapture(
 	}
 
 	if (prompt && prompt.trim()) {
-		appendConduitSessionEvent(conduitSessionId, 'prompt', 'client', prompt);
+		appendConduitSessionEvent(sessionId, 'prompt', 'client', prompt);
 	}
 	if (context && context.trim()) {
-		appendConduitSessionEvent(conduitSessionId, 'context', 'client', context);
+		appendConduitSessionEvent(sessionId, 'context', 'client', context);
 	}
-	appendConduitSessionEvent(conduitSessionId, 'status', 'event', 'running');
+	appendConduitSessionEvent(sessionId, 'status', 'event', 'running');
 
-	return { conduitSessionId };
+	return { sessionId };
 }
 
 function captureConduitStreamEvent(captureContext: ConduitCaptureContext, streamData: StreamEvent): void {
@@ -198,11 +210,11 @@ function captureConduitStreamEvent(captureContext: ConduitCaptureContext, stream
 	}
 
 	if (streamData.type === 'sessionId' && isValidUUID(streamData.content)) {
-		setConduitSessionProviderSessionId(captureContext.conduitSessionId, streamData.content);
+		setConduitSessionProviderSessionId(captureContext.sessionId, streamData.content);
 	}
 
 	appendConduitSessionEvent(
-		captureContext.conduitSessionId,
+		captureContext.sessionId,
 		streamData.type,
 		mapStreamEventRole(streamData.type),
 		streamData.content,
@@ -210,23 +222,23 @@ function captureConduitStreamEvent(captureContext: ConduitCaptureContext, stream
 }
 
 function completeConduitSessionCapture(captureContext: ConduitCaptureContext): void {
-	appendConduitSessionEvent(captureContext.conduitSessionId, 'status', 'event', 'completed');
-	setConduitSessionStatus(captureContext.conduitSessionId, 'completed');
+	appendConduitSessionEvent(captureContext.sessionId, 'status', 'event', 'completed');
+	setConduitSessionStatus(captureContext.sessionId, 'completed');
 }
 
 function failConduitSessionCapture(captureContext: ConduitCaptureContext, errorMessage: string): void {
-	appendConduitSessionEvent(captureContext.conduitSessionId, 'status', 'event', 'error');
-	appendConduitSessionEvent(captureContext.conduitSessionId, 'error', 'event', errorMessage);
-	setConduitSessionStatus(captureContext.conduitSessionId, 'error');
+	appendConduitSessionEvent(captureContext.sessionId, 'status', 'event', 'error');
+	appendConduitSessionEvent(captureContext.sessionId, 'error', 'event', errorMessage);
+	setConduitSessionStatus(captureContext.sessionId, 'error');
 }
 
 function cancelConduitSessionCapture(captureContext: ConduitCaptureContext): void {
-	appendConduitSessionEvent(captureContext.conduitSessionId, 'status', 'event', 'cancelled');
-	setConduitSessionStatus(captureContext.conduitSessionId, 'cancelled');
+	appendConduitSessionEvent(captureContext.sessionId, 'status', 'event', 'cancelled');
+	setConduitSessionStatus(captureContext.sessionId, 'cancelled');
 }
 
 export interface ConduitSessionCaptureHandle {
-	conduitSessionId: string;
+	sessionId: string;
 	handleStreamEvent: (streamData: StreamEvent) => void;
 	complete: () => void;
 	fail: (errorMessage: string) => void;
@@ -240,7 +252,7 @@ export function beginConduitSessionCapture(
 	model?: string,
 	providerSessionId?: string,
 	context?: string,
-	existingConduitSessionId?: string,
+	existingSessionId?: string,
 ): ConduitSessionCaptureHandle {
 	const captureContext = startConduitSessionCapture(
 		cli,
@@ -249,7 +261,7 @@ export function beginConduitSessionCapture(
 		model,
 		providerSessionId,
 		context,
-		existingConduitSessionId,
+		existingSessionId,
 	);
 	let finalized = false;
 
@@ -263,7 +275,7 @@ export function beginConduitSessionCapture(
 	};
 
 	return {
-		conduitSessionId: captureContext.conduitSessionId,
+		sessionId: captureContext.sessionId,
 		handleStreamEvent: (streamData) => captureConduitStreamEvent(captureContext, streamData),
 		complete: () => finalize(() => completeConduitSessionCapture(captureContext)),
 		fail: (errorMessage) => finalize(() => failConduitSessionCapture(captureContext, errorMessage)),
@@ -374,8 +386,8 @@ function extractSessionId(output: string): string | null {
 }
 
 function registerActiveSession(session: ActiveHeadlessCliSession): void {
-	if (session.conduitSessionId) {
-		activeSessionsByConduitId.set(session.conduitSessionId, session);
+	if (session.sessionId) {
+		activeSessionsBySessionId.set(session.sessionId, session);
 	}
 
 	if (session.providerSessionId) {
@@ -402,8 +414,8 @@ function unregisterActiveSession(session: ActiveHeadlessCliSession): void {
 		session.cancelKillTimeout = null;
 	}
 
-	if (session.conduitSessionId && activeSessionsByConduitId.get(session.conduitSessionId) === session) {
-		activeSessionsByConduitId.delete(session.conduitSessionId);
+	if (session.sessionId && activeSessionsBySessionId.get(session.sessionId) === session) {
+		activeSessionsBySessionId.delete(session.sessionId);
 	}
 
 	if (session.providerSessionId && activeSessionsByProviderId.get(session.providerSessionId) === session) {
@@ -418,46 +430,33 @@ function assertSessionCliOwnership(actualCli: SupportedCli, expectedCli?: Suppor
 	}
 }
 
-function resolveKnownConduitSession(cli: SupportedCli, sessionIdentifier: string) {
-	const conduitSession = getConduitSessionById(sessionIdentifier);
-	if (conduitSession) {
-		assertSessionCliOwnership(conduitSession.provider, cli, sessionIdentifier);
-		return conduitSession;
+export function resolveConduitSession(sessionId: string): ResolvedConduitSession {
+	const conduitSession = getConduitSessionById(sessionId);
+	if (!conduitSession) {
+		throw new Error(`Unknown session ID '${sessionId}'`);
 	}
 
-	const matchingSessions = listConduitSessions({ providerSessionId: sessionIdentifier, limit: 5 }).sessions;
-	const matchingCliSession = matchingSessions.find((session) => session.provider === cli);
-	if (matchingCliSession) {
-		return null;
-	}
-
-	if (matchingSessions[0]) {
-		assertSessionCliOwnership(matchingSessions[0].provider, cli, sessionIdentifier);
-	}
-
-	return null;
+	return {
+		cli: conduitSession.provider,
+		sessionId: conduitSession.sessionId,
+		providerSessionId: conduitSession.providerSessionId,
+	};
 }
 
 function resolveActiveSession(target: CancelHeadlessCliSessionInput): ActiveHeadlessCliSession | null {
-	if (target.conduitSessionId) {
-		const session = activeSessionsByConduitId.get(target.conduitSessionId);
+	if (target.sessionId) {
+		const session = activeSessionsBySessionId.get(target.sessionId);
 		if (session) {
-			assertSessionCliOwnership(session.cli, target.cli, target.conduitSessionId);
+			assertSessionCliOwnership(session.cli, target.cli, target.sessionId);
 			return session;
 		}
 	}
 
-	if (target.sessionId) {
-		const providerSession = activeSessionsByProviderId.get(target.sessionId);
+	if (target.providerSessionId) {
+		const providerSession = activeSessionsByProviderId.get(target.providerSessionId);
 		if (providerSession) {
-			assertSessionCliOwnership(providerSession.cli, target.cli, target.sessionId);
+			assertSessionCliOwnership(providerSession.cli, target.cli, target.providerSessionId);
 			return providerSession;
-		}
-
-		const conduitSession = activeSessionsByConduitId.get(target.sessionId);
-		if (conduitSession) {
-			assertSessionCliOwnership(conduitSession.cli, target.cli, target.sessionId);
-			return conduitSession;
 		}
 	}
 
@@ -465,18 +464,18 @@ function resolveActiveSession(target: CancelHeadlessCliSessionInput): ActiveHead
 }
 
 export function cancelHeadlessCliSession(target: CancelHeadlessCliSessionInput): CancelHeadlessCliSessionResult {
-	const conduitSessionId =
-		typeof target.conduitSessionId === 'string' && target.conduitSessionId.trim()
-			? target.conduitSessionId.trim()
-			: undefined;
 	const sessionId =
 		typeof target.sessionId === 'string' && target.sessionId.trim() ? target.sessionId.trim() : undefined;
+	const providerSessionId =
+		typeof target.providerSessionId === 'string' && target.providerSessionId.trim()
+			? target.providerSessionId.trim()
+			: undefined;
 
-	if (!conduitSessionId && !sessionId) {
-		throw new Error('Either conduitSessionId or sessionId is required');
+	if (!sessionId && !providerSessionId) {
+		throw new Error('Either sessionId or providerSessionId is required');
 	}
 
-	const activeSession = resolveActiveSession({ cli: target.cli, conduitSessionId, sessionId });
+	const activeSession = resolveActiveSession({ cli: target.cli, sessionId, providerSessionId });
 	if (!activeSession) {
 		throw new Error('No running session matched the provided identifiers');
 	}
@@ -506,24 +505,9 @@ export function cancelHeadlessCliSession(target: CancelHeadlessCliSessionInput):
 
 	return {
 		cli: activeSession.cli,
-		conduitSessionId: activeSession.conduitSessionId,
-		sessionId: activeSession.providerSessionId,
+		sessionId: activeSession.sessionId,
+		providerSessionId: activeSession.providerSessionId,
 		status: 'cancelled',
-	};
-}
-
-export function resolveResumeSessionTarget(cli: SupportedCli, sessionIdentifier: string): ResolvedResumeSessionTarget {
-	const conduitSession = resolveKnownConduitSession(cli, sessionIdentifier);
-	if (conduitSession) {
-		return {
-			providerSessionId: conduitSession.providerSessionId,
-			conduitSessionId: conduitSession.conduitSessionId,
-		};
-	}
-
-	return {
-		providerSessionId: sessionIdentifier,
-		conduitSessionId: findLatestConduitSessionIdByProviderSession(cli, sessionIdentifier),
 	};
 }
 
@@ -546,16 +530,16 @@ export async function resumeHeadlessCliSessionWithFallback(
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
-	conduitSessionId?: string,
+	sessionId?: string,
 ): Promise<HeadlessCliSession> {
 	if (!target.providerSessionId) {
 		if (!prompt) {
 			throw new Error(
-				`Cannot resume conduit session '${target.conduitSessionId}' because no provider session ID was captured and no new prompt was supplied`,
+				`Cannot resume session '${target.sessionId}' because no provider session ID was captured and no new prompt was supplied`,
 			);
 		}
 
-		return createHeadlessCliSession(cli, prompt, workingDir, model, streamCallback, conduitSessionId);
+		return createHeadlessCliSession(cli, prompt, workingDir, model, streamCallback, sessionId);
 	}
 
 	const resumeMessages: string[] = [];
@@ -572,7 +556,7 @@ export async function resumeHeadlessCliSessionWithFallback(
 			workingDir,
 			model,
 			captureResumeEvent,
-			conduitSessionId,
+			sessionId,
 		);
 	} catch (error) {
 		if (!prompt) {
@@ -585,7 +569,7 @@ export async function resumeHeadlessCliSessionWithFallback(
 			throw error;
 		}
 
-		return createHeadlessCliSession(cli, prompt, workingDir, model, streamCallback, conduitSessionId);
+		return createHeadlessCliSession(cli, prompt, workingDir, model, streamCallback, sessionId);
 	}
 }
 
@@ -602,9 +586,8 @@ export function finalizeConduitSessionRun(
 
 	return {
 		success: true,
-		cli,
-		conduitSessionId: captureHandle.conduitSessionId,
-		sessionId: session.sessionId,
+		provider: cli,
+		sessionId: captureHandle.sessionId,
 		status: session.status,
 		output: session.output,
 		error: session.error.length > 0 ? session.error : undefined,
@@ -614,7 +597,7 @@ export function finalizeConduitSessionRun(
 function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { command: string; args: string[] } {
 	if (cli === 'claude') {
 		const modelArgs = options.model ? ['--model', options.model] : [];
-		if (options.sessionId) {
+		if (options.providerSessionId) {
 			const promptArgs = options.prompt ? [options.prompt] : [];
 			return {
 				command: 'claude',
@@ -622,7 +605,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 					'-p',
 					'--verbose',
 					'--resume',
-					options.sessionId,
+					options.providerSessionId,
 					...modelArgs,
 					'--permission-mode',
 					'acceptEdits',
@@ -650,11 +633,19 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 	}
 
 	const modelArgs = options.model ? ['--model', options.model] : [];
-	if (options.sessionId) {
+	if (options.providerSessionId) {
 		const promptArgs = options.prompt ? [options.prompt] : [];
 		return {
 			command: 'codex',
-			args: ['exec', 'resume', '--json', '--skip-git-repo-check', ...modelArgs, options.sessionId, ...promptArgs],
+			args: [
+				'exec',
+				'resume',
+				'--json',
+				'--skip-git-repo-check',
+				...modelArgs,
+				options.providerSessionId,
+				...promptArgs,
+			],
 		};
 	}
 
@@ -765,15 +756,15 @@ function executeHeadlessCliSession(
 
 	return new Promise((resolve, reject) => {
 		const session: HeadlessCliSession = {
-			sessionId: options.sessionId || null,
+			providerSessionId: options.providerSessionId || null,
 			process: null,
 			output: [],
 			error: [],
 			status: 'running',
 		};
 
-		if (options.sessionId) {
-			streamCallback?.({ type: 'sessionId', content: options.sessionId });
+		if (options.providerSessionId) {
+			streamCallback?.({ type: 'sessionId', content: options.providerSessionId });
 		}
 
 		const child = spawn(command.command, command.args, {
@@ -783,8 +774,8 @@ function executeHeadlessCliSession(
 		});
 		const activeSession: ActiveHeadlessCliSession = {
 			cli,
-			conduitSessionId: options.conduitSessionId || null,
-			providerSessionId: options.sessionId || null,
+			sessionId: options.sessionId || null,
+			providerSessionId: options.providerSessionId || null,
 			process: child,
 			cancelRequested: false,
 			cancelReason: null,
@@ -806,12 +797,12 @@ function executeHeadlessCliSession(
 				session.error.push(line);
 			}
 
-			if (!session.sessionId) {
-				const foundSessionId = extractSessionId(line);
-				if (foundSessionId) {
-					session.sessionId = foundSessionId;
-					attachProviderSessionId(activeSession, foundSessionId);
-					streamCallback?.({ type: 'sessionId', content: foundSessionId });
+			if (!session.providerSessionId) {
+				const foundProviderSessionId = extractSessionId(line);
+				if (foundProviderSessionId) {
+					session.providerSessionId = foundProviderSessionId;
+					attachProviderSessionId(activeSession, foundProviderSessionId);
+					streamCallback?.({ type: 'sessionId', content: foundProviderSessionId });
 				}
 			}
 
@@ -897,7 +888,7 @@ export async function createHeadlessCliSession(
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
-	conduitSessionId?: string,
+	sessionId?: string,
 	isDangerous = false,
 ): Promise<HeadlessCliSession> {
 	try {
@@ -912,27 +903,27 @@ export async function createHeadlessCliSession(
 
 	return executeHeadlessCliSession(
 		cli,
-		{ prompt, workingDir, model, streamCallback, conduitSessionId, isDangerous },
+		{ prompt, workingDir, model, streamCallback, sessionId, isDangerous },
 		`Failed to start ${cli}`,
 	);
 }
 
 export async function resumeHeadlessCliSession(
 	cli: SupportedCli,
-	sessionId: string,
+	providerSessionId: string,
 	prompt: string | undefined,
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
-	conduitSessionId?: string,
+	sessionId?: string,
 ): Promise<HeadlessCliSession> {
 	try {
 		prompt = normalizeResumePrompt(prompt);
 		workingDir = validateWorkingDirectory(workingDir);
 		await ensureCliAvailable(cli, workingDir);
 
-		if (!sessionId || !isValidUUID(sessionId)) {
-			throw new Error('Invalid session ID format (must be a valid UUID)');
+		if (!providerSessionId || !isValidUUID(providerSessionId)) {
+			throw new Error('Invalid provider session ID format (must be a valid UUID)');
 		}
 	} catch (error) {
 		const errorMsg = error instanceof Error ? error.message : 'Validation error';
@@ -942,102 +933,155 @@ export async function resumeHeadlessCliSession(
 
 	return executeHeadlessCliSession(
 		cli,
-		{ sessionId, prompt, workingDir, model, streamCallback, conduitSessionId },
+		{ providerSessionId, prompt, workingDir, model, streamCallback, sessionId },
 		`Failed to resume ${cli} session`,
 	);
 }
 
-function emitSessionEvent(socket: Socket, eventPrefix: string, streamData: StreamEvent) {
+interface SocketSessionEventContext {
+	provider: SupportedCli;
+	sessionId: string;
+}
+
+function emitSessionEvent(
+	socket: Socket,
+	eventPrefix: string,
+	streamData: StreamEvent,
+	context: SocketSessionEventContext,
+) {
+	const eventPayload = {
+		provider: context.provider,
+		sessionId: context.sessionId,
+	};
+
 	switch (streamData.type) {
 		case 'sessionId':
-			socket.emit(`${eventPrefix}:id`, { sessionId: streamData.content });
 			break;
 		case 'stdout':
-			socket.emit(`${eventPrefix}:output`, { data: streamData.content });
+			socket.emit(`${eventPrefix}:output`, { ...eventPayload, data: streamData.content });
 			break;
 		case 'stderr':
-			socket.emit(`${eventPrefix}:error:output`, { data: streamData.content });
+			socket.emit(`${eventPrefix}:error:output`, { ...eventPayload, data: streamData.content });
 			break;
 		case 'complete':
-			socket.emit(`${eventPrefix}:complete`, { message: streamData.content });
+			socket.emit(`${eventPrefix}:complete`, { ...eventPayload, message: streamData.content });
 			break;
 		case 'error':
-			socket.emit(`${eventPrefix}:error`, { error: streamData.content });
+			socket.emit(`${eventPrefix}:error`, { ...eventPayload, error: streamData.content });
 			break;
 		case 'cancelled':
-			socket.emit(`${eventPrefix}:cancelled`, { message: streamData.content });
+			socket.emit(`${eventPrefix}:cancelled`, { ...eventPayload, message: streamData.content });
 			break;
 	}
 }
 
-function resolveCli(value: unknown, fallback: SupportedCli): SupportedCli {
-	if (value === undefined || value === null) return fallback;
-	if (!isSupportedCli(value)) {
-		throw new Error(`Unsupported cli '${String(value)}'. Supported values are: claude, codex`);
-	}
-	return value;
+interface UnifiedSocketSessionCreatePayload extends SocketSessionPayload {
+	provider?: SupportedCli;
 }
 
-interface SocketSessionCancelPayload {
+interface UnifiedSocketSessionResumePayload extends SocketSessionPayload {
 	sessionId?: string;
-	conduitSessionId?: string;
 }
 
-export function handleHeadlessSessionCancel(socket: Socket, eventPrefix: string, cli: SupportedCli) {
-	socket.on(`${eventPrefix}:cancel`, (data: SocketSessionCancelPayload = {}) => {
+interface UnifiedSocketSessionCancelPayload {
+	sessionId?: string;
+}
+
+function emitSessionError(
+	socket: Socket,
+	eventPrefix: string,
+	error: unknown,
+	context?: Partial<SocketSessionEventContext>,
+): void {
+	socket.emit(`${eventPrefix}:error`, {
+		provider: context?.provider,
+		sessionId: context?.sessionId,
+		error: error instanceof Error ? error.message : 'Unknown error occurred',
+	});
+}
+
+function persistConduitStreamEvent(captureContext: ConduitCaptureContext, streamData: StreamEvent): void {
+	try {
+		captureConduitStreamEvent(captureContext, streamData);
+	} catch (error) {
+		console.error('Failed to persist conduit stream event:', error);
+	}
+}
+
+function finalizeSocketCapture(
+	captureContext: ConduitCaptureContext | null,
+	session: HeadlessCliSession,
+): void {
+	if (!captureContext) {
+		return;
+	}
+
+	if (session.status === 'cancelled') {
+		cancelConduitSessionCapture(captureContext);
+		return;
+	}
+
+	completeConduitSessionCapture(captureContext);
+}
+
+export function handleUnifiedSessionCancel(socket: Socket, eventPrefix = 'session') {
+	socket.on(`${eventPrefix}:cancel`, (data: UnifiedSocketSessionCancelPayload = {}) => {
+		const requestedSessionId = data.sessionId;
+
 		try {
-			if (data.sessionId !== undefined && typeof data.sessionId !== 'string') {
+			if (!requestedSessionId || typeof requestedSessionId !== 'string') {
 				socket.emit(`${eventPrefix}:cancel:update`, {
 					success: false,
-					error: 'sessionId must be a string when provided',
+					error: 'sessionId is required and must be a string',
 				});
 				return;
 			}
 
-			if (data.conduitSessionId !== undefined && typeof data.conduitSessionId !== 'string') {
+			if (!isValidUUID(requestedSessionId)) {
 				socket.emit(`${eventPrefix}:cancel:update`, {
 					success: false,
-					error: 'conduitSessionId must be a string when provided',
+					sessionId: requestedSessionId,
+					error: 'Invalid session ID format (must be a valid UUID)',
 				});
 				return;
 			}
 
-			if (!data.sessionId && !data.conduitSessionId) {
-				socket.emit(`${eventPrefix}:cancel:update`, {
-					success: false,
-					error: 'sessionId or conduitSessionId is required',
-				});
-				return;
-			}
-
+			const resolvedSession = resolveConduitSession(requestedSessionId);
 			const result = cancelHeadlessCliSession({
-				cli,
-				sessionId: data.sessionId,
-				conduitSessionId: data.conduitSessionId,
+				cli: resolvedSession.cli,
+				sessionId: resolvedSession.sessionId,
 			});
 
 			socket.emit(`${eventPrefix}:cancel:update`, {
 				success: true,
-				cli: result.cli,
-				conduitSessionId: result.conduitSessionId,
-				sessionId: result.sessionId,
+				provider: result.cli,
+				sessionId: resolvedSession.sessionId,
 				status: result.status,
 			});
 		} catch (error) {
 			socket.emit(`${eventPrefix}:cancel:update`, {
 				success: false,
+				sessionId: typeof requestedSessionId === 'string' ? requestedSessionId : undefined,
 				error: error instanceof Error ? error.message : 'Unknown error occurred',
 			});
 		}
 	});
 }
 
-export function handleHeadlessSessionCreate(socket: Socket, eventPrefix: string, defaultCli: SupportedCli) {
-	socket.on(`${eventPrefix}:create`, async (data: SocketSessionPayload) => {
+export function handleUnifiedSessionCreate(socket: Socket, eventPrefix = 'session') {
+	socket.on(`${eventPrefix}:create`, async (data: UnifiedSocketSessionCreatePayload) => {
 		let captureContext: ConduitCaptureContext | null = null;
+		let cli: SupportedCli | null = null;
 
 		try {
 			const { prompt, context, agentId, workspaceId, pipelineId } = data;
+
+			if (!isSupportedCli(data.provider)) {
+				socket.emit(`${eventPrefix}:error`, {
+					error: "provider is required and must be either 'claude' or 'codex'",
+				});
+				return;
+			}
 
 			if (!prompt || typeof prompt !== 'string') {
 				socket.emit(`${eventPrefix}:error`, { error: 'Prompt is required and must be a string' });
@@ -1068,8 +1112,7 @@ export function handleHeadlessSessionCreate(socket: Socket, eventPrefix: string,
 				return;
 			}
 
-			const cli = resolveCli(data.cli, defaultCli);
-			const targetDir = workspace.path;
+			cli = data.provider;
 			captureContext = startConduitSessionCapture(
 				cli,
 				{ agentId, workspaceId, pipelineId },
@@ -1079,82 +1122,91 @@ export function handleHeadlessSessionCreate(socket: Socket, eventPrefix: string,
 				context,
 			);
 
+			const sessionContext = {
+				provider: cli,
+				sessionId: captureContext.sessionId,
+			};
+
 			socket.emit(`${eventPrefix}:started`, {
+				...sessionContext,
 				message: `${cli} session starting...`,
-				conduitSessionId: captureContext.conduitSessionId,
 			});
 
 			const session = await createHeadlessCliSession(
 				cli,
 				prompt,
-				targetDir,
+				workspace.path,
 				data.model,
 				(streamData) => {
-					emitSessionEvent(socket, eventPrefix, streamData);
-
+					emitSessionEvent(socket, eventPrefix, streamData, sessionContext);
 					if (captureContext) {
-						try {
-							captureConduitStreamEvent(captureContext, streamData);
-						} catch (error) {
-							console.error('Failed to persist conduit stream event:', error);
-						}
+						persistConduitStreamEvent(captureContext, streamData);
 					}
 				},
-				captureContext.conduitSessionId,
+				captureContext.sessionId,
 				data.isDangerous ?? false,
 			);
 
-			if (captureContext) {
-				if (session.status === 'cancelled') {
-					cancelConduitSessionCapture(captureContext);
-				} else {
-					completeConduitSessionCapture(captureContext);
-				}
-			}
+			finalizeSocketCapture(captureContext, session);
 		} catch (error) {
 			if (captureContext) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
 				failConduitSessionCapture(captureContext, errorMessage);
 			}
 
-			socket.emit(`${eventPrefix}:error`, {
-				error: error instanceof Error ? error.message : 'Unknown error occurred',
+			emitSessionError(socket, eventPrefix, error, {
+				provider: cli ?? undefined,
+				sessionId: captureContext?.sessionId,
 			});
 		}
 	});
 }
 
-export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string, defaultCli: SupportedCli) {
-	socket.on(`${eventPrefix}:resume`, async (data: SocketSessionPayload) => {
+export function handleUnifiedSessionResume(socket: Socket, eventPrefix = 'session') {
+	socket.on(`${eventPrefix}:resume`, async (data: UnifiedSocketSessionResumePayload) => {
 		let captureContext: ConduitCaptureContext | null = null;
+		let cli: SupportedCli | null = null;
+		const requestedSessionId = data.sessionId;
 
 		try {
-			const { sessionId, prompt, context, agentId, workspaceId, pipelineId } = data;
+			const { prompt, context, agentId, workspaceId, pipelineId } = data;
 
-			if (!sessionId || typeof sessionId !== 'string') {
-				socket.emit(`${eventPrefix}:error`, { error: 'Session ID is required and must be a string' });
+			if (!requestedSessionId || typeof requestedSessionId !== 'string') {
+				socket.emit(`${eventPrefix}:error`, { error: 'sessionId is required and must be a string' });
 				return;
 			}
 
-			if (!isValidUUID(sessionId)) {
-				socket.emit(`${eventPrefix}:error`, { error: 'Invalid session ID format (must be a valid UUID)' });
+			if (!isValidUUID(requestedSessionId)) {
+				socket.emit(`${eventPrefix}:error`, {
+					sessionId: requestedSessionId,
+					error: 'Invalid session ID format (must be a valid UUID)',
+				});
 				return;
 			}
 
 			if (prompt !== undefined && typeof prompt !== 'string') {
-				socket.emit(`${eventPrefix}:error`, { error: 'Prompt must be a string when provided' });
+				socket.emit(`${eventPrefix}:error`, {
+					sessionId: requestedSessionId,
+					error: 'Prompt must be a string when provided',
+				});
 				return;
 			}
 
 			const normalizedPrompt = normalizeResumePrompt(prompt);
 
 			if (data.model !== undefined && typeof data.model !== 'string') {
-				socket.emit(`${eventPrefix}:error`, { error: 'Model must be a string' });
+				socket.emit(`${eventPrefix}:error`, {
+					sessionId: requestedSessionId,
+					error: 'Model must be a string',
+				});
 				return;
 			}
 
 			if (context !== undefined && typeof context !== 'string') {
-				socket.emit(`${eventPrefix}:error`, { error: 'Context must be a string' });
+				socket.emit(`${eventPrefix}:error`, {
+					sessionId: requestedSessionId,
+					error: 'Context must be a string',
+				});
 				return;
 			}
 
@@ -1162,14 +1214,19 @@ export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string,
 			const { workspace, error: workspaceError } = resolveReadyWorkspaceForNewWork(workspaceId);
 			if (!workspace || workspaceError) {
 				socket.emit(`${eventPrefix}:error`, {
+					sessionId: requestedSessionId,
 					error: workspaceError || 'Workspace is not ready for new work',
 				});
 				return;
 			}
 
-			const cli = resolveCli(data.cli, defaultCli);
-			const resumeTarget = resolveResumeSessionTarget(cli, sessionId);
-			const targetDir = workspace.path;
+			const resolvedSession = resolveConduitSession(requestedSessionId);
+			cli = resolvedSession.cli;
+			const resumeTarget = {
+				providerSessionId: resolvedSession.providerSessionId,
+				sessionId: resolvedSession.sessionId,
+			};
+
 			captureContext = startConduitSessionCapture(
 				cli,
 				{ agentId, workspaceId, pipelineId },
@@ -1177,54 +1234,45 @@ export function handleHeadlessSessionResume(socket: Socket, eventPrefix: string,
 				data.model,
 				resumeTarget.providerSessionId || undefined,
 				context,
-				resumeTarget.conduitSessionId || undefined,
+				resumeTarget.sessionId,
 			);
 
+			const sessionContext = {
+				provider: cli,
+				sessionId: captureContext.sessionId,
+			};
+
 			socket.emit(`${eventPrefix}:started`, {
+				...sessionContext,
 				message: `Resuming ${cli} session...`,
-				conduitSessionId: captureContext.conduitSessionId,
 			});
 
 			const session = await resumeHeadlessCliSessionWithFallback(
 				cli,
 				resumeTarget,
 				normalizedPrompt,
-				targetDir,
+				workspace.path,
 				data.model,
 				(streamData) => {
-					emitSessionEvent(socket, eventPrefix, streamData);
-
+					emitSessionEvent(socket, eventPrefix, streamData, sessionContext);
 					if (captureContext) {
-						try {
-							captureConduitStreamEvent(captureContext, streamData);
-						} catch (error) {
-							console.error('Failed to persist conduit stream event:', error);
-						}
+						persistConduitStreamEvent(captureContext, streamData);
 					}
 				},
-				captureContext.conduitSessionId,
+				captureContext.sessionId,
 			);
 
-			if (captureContext) {
-				if (session.status === 'cancelled') {
-					cancelConduitSessionCapture(captureContext);
-				} else {
-					completeConduitSessionCapture(captureContext);
-				}
-			}
+			finalizeSocketCapture(captureContext, session);
 		} catch (error) {
 			if (captureContext) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
 				failConduitSessionCapture(captureContext, errorMessage);
 			}
 
-			socket.emit(`${eventPrefix}:error`, {
-				error: error instanceof Error ? error.message : 'Unknown error occurred',
+			emitSessionError(socket, eventPrefix, error, {
+				provider: cli ?? undefined,
+				sessionId: typeof requestedSessionId === 'string' ? requestedSessionId : captureContext?.sessionId,
 			});
 		}
 	});
-}
-
-export function resolveSupportedCli(value: unknown, fallback: SupportedCli): SupportedCli {
-	return resolveCli(value, fallback);
 }
