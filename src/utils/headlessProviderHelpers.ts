@@ -14,9 +14,11 @@ import {
 } from '../db/sqlite';
 import { resolveReadyWorkspaceForNewWork } from './workspaceReadiness';
 
-export type SupportedCli = 'claude' | 'codex';
+export type SupportedProvider = 'claude' | 'codex';
+type ProviderCapabilityStatus = 'unknown' | 'working' | 'missing' | 'failing';
+type ProviderCapabilityCheck = 'startup-preflight' | 'request-existence' | null;
 
-export interface HeadlessCliSession {
+export interface HeadlessProviderSession {
 	providerSessionId: string | null;
 	process: ReturnType<typeof spawn> | null;
 	output: string[];
@@ -29,7 +31,7 @@ export interface StreamEvent {
 	content: string;
 }
 
-interface CliSessionOptions {
+interface ProviderSessionOptions {
 	prompt?: string;
 	workingDir: string;
 	providerSessionId?: string;
@@ -55,19 +57,18 @@ export interface ConduitSessionRequestMetadata {
 	pipelineId?: string;
 }
 
-const CLI_PRECHECK_TIMEOUT_MS = 5000;
+const PROVIDER_PRECHECK_TIMEOUT_MS = 5000;
 const SESSION_CANCEL_GRACE_PERIOD_MS = 5000;
 
 // UUID pattern for matching and validating session IDs
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-const cliAvailabilityCache = new Set<SupportedCli>();
 
 interface ConduitCaptureContext {
 	sessionId: string;
 }
 
-interface ActiveHeadlessCliSession {
-	cli: SupportedCli;
+interface ActiveHeadlessProviderSession {
+	provider: SupportedProvider;
 	sessionId: string | null;
 	providerSessionId: string | null;
 	process: ReturnType<typeof spawn>;
@@ -76,14 +77,14 @@ interface ActiveHeadlessCliSession {
 	cancelKillTimeout: NodeJS.Timeout | null;
 }
 
-export interface CancelHeadlessCliSessionInput {
-	cli?: SupportedCli;
+export interface CancelHeadlessProviderSessionInput {
+	provider?: SupportedProvider;
 	sessionId?: string;
 	providerSessionId?: string;
 }
 
-export interface CancelHeadlessCliSessionResult {
-	cli: SupportedCli;
+export interface CancelHeadlessProviderSessionResult {
+	provider: SupportedProvider;
 	sessionId: string | null;
 	providerSessionId: string | null;
 	status: 'cancelled';
@@ -95,22 +96,133 @@ export interface ResolvedResumeSessionTarget {
 }
 
 export interface ResolvedConduitSession {
-	cli: SupportedCli;
+	provider: SupportedProvider;
 	sessionId: string;
 	providerSessionId: string | null;
 }
 
 export interface HeadlessSessionRunSuccessPayload {
 	success: true;
-	provider: SupportedCli;
+	provider: SupportedProvider;
 	sessionId: string;
-	status: HeadlessCliSession['status'];
+	status: HeadlessProviderSession['status'];
 	output: string[];
 	error?: string[];
 }
 
-const activeSessionsBySessionId = new Map<string, ActiveHeadlessCliSession>();
-const activeSessionsByProviderId = new Map<string, ActiveHeadlessCliSession>();
+export interface ProviderCapability {
+	provider: SupportedProvider;
+	status: ProviderCapabilityStatus;
+	available: boolean;
+	checkedAt: string | null;
+	checkedBy: ProviderCapabilityCheck;
+	error: string | null;
+	commandPath: string | null;
+}
+
+const SUPPORTED_PROVIDERS: SupportedProvider[] = ['claude', 'codex'];
+const activeSessionsBySessionId = new Map<string, ActiveHeadlessProviderSession>();
+const activeSessionsByProviderId = new Map<string, ActiveHeadlessProviderSession>();
+
+function createDefaultProviderCapability(provider: SupportedProvider): ProviderCapability {
+	return {
+		provider,
+		status: 'unknown',
+		available: false,
+		checkedAt: null,
+		checkedBy: null,
+		error: null,
+		commandPath: null,
+	};
+}
+
+const providerCapabilities = new Map<SupportedProvider, ProviderCapability>(
+	SUPPORTED_PROVIDERS.map((provider) => [provider, createDefaultProviderCapability(provider)]),
+);
+
+function getProviderCapability(provider: SupportedProvider): ProviderCapability {
+	return providerCapabilities.get(provider) || createDefaultProviderCapability(provider);
+}
+
+function setProviderCapability(
+	provider: SupportedProvider,
+	updates: Partial<Omit<ProviderCapability, 'provider'>>,
+): ProviderCapability {
+	const nextCapability = {
+		...getProviderCapability(provider),
+		...updates,
+		provider,
+	};
+
+	providerCapabilities.set(provider, nextCapability);
+	return nextCapability;
+}
+
+export function listProviderCapabilities(): ProviderCapability[] {
+	return SUPPORTED_PROVIDERS.map((provider) => ({ ...getProviderCapability(provider) }));
+}
+
+function isMissingProviderExecutableError(error: unknown): boolean {
+	if (!(error instanceof Error)) {
+		return false;
+	}
+
+	return error.message.includes('command not found') || error.message.includes('not available on this system');
+}
+
+function resolveProviderCommandPath(provider: SupportedProvider): string | null {
+	const searchPath = process.env.PATH;
+	if (!searchPath) {
+		return null;
+	}
+
+	const extensions =
+		process.platform === 'win32'
+			? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter((value) => value.length > 0)
+			: [''];
+
+	for (const entry of searchPath.split(path.delimiter)) {
+		if (!entry) {
+			continue;
+		}
+
+		for (const extension of extensions) {
+			const candidate = path.join(entry, `${provider}${extension}`);
+
+			try {
+				fs.accessSync(candidate, fs.constants.X_OK);
+				return candidate;
+			} catch {}
+		}
+	}
+
+	return null;
+}
+
+function ensureProviderExecutableExists(provider: SupportedProvider): string {
+	const commandPath = resolveProviderCommandPath(provider);
+	if (!commandPath) {
+		throw new Error(`'${provider}' provider executable is not available on this system (command not found).`);
+	}
+
+	return commandPath;
+}
+
+function markProviderCapabilityUnavailable(
+	provider: SupportedProvider,
+	error: unknown,
+	checkedBy: ProviderCapabilityCheck,
+): void {
+	const message = error instanceof Error ? error.message : String(error);
+	setProviderCapability(provider, {
+		status: isMissingProviderExecutableError(error) ? 'missing' : 'failing',
+		available: false,
+		checkedAt: new Date().toISOString(),
+		checkedBy,
+		error: message,
+		commandPath: resolveProviderCommandPath(provider),
+	});
+}
 
 function assertNoActiveRunForSession(sessionId: string): void {
 	if (activeSessionsBySessionId.has(sessionId)) {
@@ -150,7 +262,7 @@ export function validateConduitSessionRequestMetadata(metadata: ConduitSessionRe
 }
 
 function startConduitSessionCapture(
-	cli: SupportedCli,
+	provider: SupportedProvider,
 	metadata: ConduitSessionRequestMetadata,
 	prompt?: string,
 	model?: string,
@@ -161,7 +273,7 @@ function startConduitSessionCapture(
 	const existingSessionId =
 		preferredSessionId ||
 		(providerSessionId && isValidUUID(providerSessionId)
-			? findLatestConduitSessionIdByProviderSession(cli, providerSessionId)
+			? findLatestConduitSessionIdByProviderSession(provider, providerSessionId)
 			: null);
 
 	const sessionId = existingSessionId || randomUUID();
@@ -173,7 +285,7 @@ function startConduitSessionCapture(
 	if (existingSessionId) {
 		updateConduitSessionForRun(sessionId, {
 			providerSessionId: providerSessionId || null,
-			provider: cli,
+			provider,
 			agentId: metadata.agentId,
 			pipelineId: metadata.pipelineId || null,
 			workspaceId: metadata.workspaceId,
@@ -184,7 +296,7 @@ function startConduitSessionCapture(
 		createConduitSession({
 			sessionId,
 			providerSessionId: providerSessionId || null,
-			provider: cli,
+			provider,
 			agentId: metadata.agentId,
 			pipelineId: metadata.pipelineId || null,
 			workspaceId: metadata.workspaceId,
@@ -246,7 +358,7 @@ export interface ConduitSessionCaptureHandle {
 }
 
 export function beginConduitSessionCapture(
-	cli: SupportedCli,
+	provider: SupportedProvider,
 	metadata: ConduitSessionRequestMetadata,
 	prompt?: string,
 	model?: string,
@@ -255,7 +367,7 @@ export function beginConduitSessionCapture(
 	existingSessionId?: string,
 ): ConduitSessionCaptureHandle {
 	const captureContext = startConduitSessionCapture(
-		cli,
+		provider,
 		metadata,
 		prompt,
 		model,
@@ -283,7 +395,7 @@ export function beginConduitSessionCapture(
 	};
 }
 
-export function isSupportedCli(value: unknown): value is SupportedCli {
+export function isSupportedProvider(value: unknown): value is SupportedProvider {
 	return value === 'claude' || value === 'codex';
 }
 
@@ -385,7 +497,7 @@ function extractSessionId(output: string): string | null {
 	return match ? match[0] : null;
 }
 
-function registerActiveSession(session: ActiveHeadlessCliSession): void {
+function registerActiveSession(session: ActiveHeadlessProviderSession): void {
 	if (session.sessionId) {
 		activeSessionsBySessionId.set(session.sessionId, session);
 	}
@@ -395,7 +507,7 @@ function registerActiveSession(session: ActiveHeadlessCliSession): void {
 	}
 }
 
-function attachProviderSessionId(session: ActiveHeadlessCliSession, providerSessionId: string): void {
+function attachProviderSessionId(session: ActiveHeadlessProviderSession, providerSessionId: string): void {
 	if (session.providerSessionId === providerSessionId) {
 		return;
 	}
@@ -408,7 +520,7 @@ function attachProviderSessionId(session: ActiveHeadlessCliSession, providerSess
 	activeSessionsByProviderId.set(providerSessionId, session);
 }
 
-function unregisterActiveSession(session: ActiveHeadlessCliSession): void {
+function unregisterActiveSession(session: ActiveHeadlessProviderSession): void {
 	if (session.cancelKillTimeout) {
 		clearTimeout(session.cancelKillTimeout);
 		session.cancelKillTimeout = null;
@@ -423,10 +535,14 @@ function unregisterActiveSession(session: ActiveHeadlessCliSession): void {
 	}
 }
 
-function assertSessionCliOwnership(actualCli: SupportedCli, expectedCli?: SupportedCli, sessionId?: string): void {
-	if (expectedCli && actualCli !== expectedCli) {
+function assertSessionProviderOwnership(
+	actualProvider: SupportedProvider,
+	expectedProvider?: SupportedProvider,
+	sessionId?: string,
+): void {
+	if (expectedProvider && actualProvider !== expectedProvider) {
 		const sessionLabel = sessionId ? `Session '${sessionId}'` : 'Session';
-		throw new Error(`${sessionLabel} belongs to ${actualCli}, not ${expectedCli}`);
+		throw new Error(`${sessionLabel} belongs to ${actualProvider}, not ${expectedProvider}`);
 	}
 }
 
@@ -437,17 +553,17 @@ export function resolveConduitSession(sessionId: string): ResolvedConduitSession
 	}
 
 	return {
-		cli: conduitSession.provider,
+		provider: conduitSession.provider,
 		sessionId: conduitSession.sessionId,
 		providerSessionId: conduitSession.providerSessionId,
 	};
 }
 
-function resolveActiveSession(target: CancelHeadlessCliSessionInput): ActiveHeadlessCliSession | null {
+function resolveActiveSession(target: CancelHeadlessProviderSessionInput): ActiveHeadlessProviderSession | null {
 	if (target.sessionId) {
 		const session = activeSessionsBySessionId.get(target.sessionId);
 		if (session) {
-			assertSessionCliOwnership(session.cli, target.cli, target.sessionId);
+			assertSessionProviderOwnership(session.provider, target.provider, target.sessionId);
 			return session;
 		}
 	}
@@ -455,7 +571,7 @@ function resolveActiveSession(target: CancelHeadlessCliSessionInput): ActiveHead
 	if (target.providerSessionId) {
 		const providerSession = activeSessionsByProviderId.get(target.providerSessionId);
 		if (providerSession) {
-			assertSessionCliOwnership(providerSession.cli, target.cli, target.providerSessionId);
+			assertSessionProviderOwnership(providerSession.provider, target.provider, target.providerSessionId);
 			return providerSession;
 		}
 	}
@@ -463,7 +579,9 @@ function resolveActiveSession(target: CancelHeadlessCliSessionInput): ActiveHead
 	return null;
 }
 
-export function cancelHeadlessCliSession(target: CancelHeadlessCliSessionInput): CancelHeadlessCliSessionResult {
+export function cancelHeadlessProviderSession(
+	target: CancelHeadlessProviderSessionInput,
+): CancelHeadlessProviderSessionResult {
 	const sessionId =
 		typeof target.sessionId === 'string' && target.sessionId.trim() ? target.sessionId.trim() : undefined;
 	const providerSessionId =
@@ -475,7 +593,7 @@ export function cancelHeadlessCliSession(target: CancelHeadlessCliSessionInput):
 		throw new Error('Either sessionId or providerSessionId is required');
 	}
 
-	const activeSession = resolveActiveSession({ cli: target.cli, sessionId, providerSessionId });
+	const activeSession = resolveActiveSession({ provider: target.provider, sessionId, providerSessionId });
 	if (!activeSession) {
 		throw new Error('No running session matched the provided identifiers');
 	}
@@ -504,7 +622,7 @@ export function cancelHeadlessCliSession(target: CancelHeadlessCliSessionInput):
 	}
 
 	return {
-		cli: activeSession.cli,
+		provider: activeSession.provider,
 		sessionId: activeSession.sessionId,
 		providerSessionId: activeSession.providerSessionId,
 		status: 'cancelled',
@@ -523,15 +641,15 @@ function looksLikeMissingProviderSession(message: string): boolean {
 	);
 }
 
-export async function resumeHeadlessCliSessionWithFallback(
-	cli: SupportedCli,
+export async function resumeHeadlessProviderSessionWithFallback(
+	provider: SupportedProvider,
 	target: ResolvedResumeSessionTarget,
 	prompt: string | undefined,
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
 	sessionId?: string,
-): Promise<HeadlessCliSession> {
+): Promise<HeadlessProviderSession> {
 	if (!target.providerSessionId) {
 		if (!prompt) {
 			throw new Error(
@@ -539,7 +657,7 @@ export async function resumeHeadlessCliSessionWithFallback(
 			);
 		}
 
-		return createHeadlessCliSession(cli, prompt, workingDir, model, streamCallback, sessionId);
+		return createHeadlessProviderSession(provider, prompt, workingDir, model, streamCallback, sessionId);
 	}
 
 	const resumeMessages: string[] = [];
@@ -549,8 +667,8 @@ export async function resumeHeadlessCliSessionWithFallback(
 	};
 
 	try {
-		return await resumeHeadlessCliSession(
-			cli,
+		return await resumeHeadlessProviderSession(
+			provider,
 			target.providerSessionId,
 			prompt,
 			workingDir,
@@ -569,14 +687,14 @@ export async function resumeHeadlessCliSessionWithFallback(
 			throw error;
 		}
 
-		return createHeadlessCliSession(cli, prompt, workingDir, model, streamCallback, sessionId);
+		return createHeadlessProviderSession(provider, prompt, workingDir, model, streamCallback, sessionId);
 	}
 }
 
 export function finalizeConduitSessionRun(
-	cli: SupportedCli,
+	provider: SupportedProvider,
 	captureHandle: ConduitSessionCaptureHandle,
-	session: HeadlessCliSession,
+	session: HeadlessProviderSession,
 ): HeadlessSessionRunSuccessPayload {
 	if (session.status === 'cancelled') {
 		captureHandle.cancel();
@@ -586,7 +704,7 @@ export function finalizeConduitSessionRun(
 
 	return {
 		success: true,
-		provider: cli,
+		provider,
 		sessionId: captureHandle.sessionId,
 		status: session.status,
 		output: session.output,
@@ -594,13 +712,18 @@ export function finalizeConduitSessionRun(
 	};
 }
 
-function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { command: string; args: string[] } {
-	if (cli === 'claude') {
+function buildProviderCommand(
+	provider: SupportedProvider,
+	options: ProviderSessionOptions,
+): { command: string; args: string[] } {
+	const executable = getProviderCapability(provider).commandPath || provider;
+
+	if (provider === 'claude') {
 		const modelArgs = options.model ? ['--model', options.model] : [];
 		if (options.providerSessionId) {
 			const promptArgs = options.prompt ? [options.prompt] : [];
 			return {
-				command: 'claude',
+				command: executable,
 				args: [
 					'-p',
 					'--verbose',
@@ -617,7 +740,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 		}
 
 		return {
-			command: 'claude',
+			command: executable,
 			args: [
 				'-p',
 				'--verbose',
@@ -636,7 +759,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 	if (options.providerSessionId) {
 		const promptArgs = options.prompt ? [options.prompt] : [];
 		return {
-			command: 'codex',
+			command: executable,
 			args: [
 				'exec',
 				'resume',
@@ -650,7 +773,7 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 	}
 
 	return {
-		command: 'codex',
+		command: executable,
 		args: [
 			'exec',
 			'--json',
@@ -664,21 +787,19 @@ function buildCliCommand(cli: SupportedCli, options: CliSessionOptions): { comma
 	};
 }
 
-function preflightArgsFor(cli: SupportedCli): string[] {
-	if (cli === 'claude') {
+function preflightArgsFor(provider: SupportedProvider): string[] {
+	if (provider === 'claude') {
 		return ['--version'];
 	}
 
 	return ['--version'];
 }
 
-async function ensureCliAvailable(cli: SupportedCli, workingDir: string): Promise<void> {
-	if (cliAvailabilityCache.has(cli)) {
-		return;
-	}
+async function runProviderPreflight(provider: SupportedProvider, workingDir: string): Promise<string> {
+	const commandPath = ensureProviderExecutableExists(provider);
 
 	await new Promise<void>((resolve, reject) => {
-		const preflight = spawn(cli, preflightArgsFor(cli), {
+		const preflight = spawn(commandPath, preflightArgsFor(provider), {
 			cwd: workingDir,
 			env: { ...process.env },
 			stdio: ['ignore', 'pipe', 'pipe'],
@@ -696,7 +817,6 @@ async function ensureCliAvailable(cli: SupportedCli, workingDir: string): Promis
 				return;
 			}
 
-			cliAvailabilityCache.add(cli);
 			resolve();
 		};
 
@@ -705,9 +825,11 @@ async function ensureCliAvailable(cli: SupportedCli, workingDir: string): Promis
 				preflight.kill('SIGTERM');
 			} catch {}
 			finish(
-				new Error(`'${cli}' is installed but failed preflight (timeout after ${CLI_PRECHECK_TIMEOUT_MS}ms).`),
+				new Error(
+					`'${provider}' provider executable is installed but failed preflight (timeout after ${PROVIDER_PRECHECK_TIMEOUT_MS}ms).`,
+				),
 			);
-		}, CLI_PRECHECK_TIMEOUT_MS);
+		}, PROVIDER_PRECHECK_TIMEOUT_MS);
 
 		preflight.stdout.on('data', (data: Buffer) => {
 			stdout += data.toString();
@@ -719,12 +841,17 @@ async function ensureCliAvailable(cli: SupportedCli, workingDir: string): Promis
 
 		preflight.on('error', (error) => {
 			clearTimeout(timeout);
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-				finish(new Error(`'${cli}' CLI is not available on this system (command not found).`));
+			if (
+				(error as NodeJS.ErrnoException).code === 'ENOENT' ||
+				(error as NodeJS.ErrnoException).code === 'EACCES'
+			) {
+				finish(
+					new Error(`'${provider}' provider executable is not available on this system (command not found).`),
+				);
 				return;
 			}
 
-			finish(new Error(`Failed to run '${cli}' preflight check: ${error.message}`));
+			finish(new Error(`Failed to run '${provider}' provider preflight check: ${error.message}`));
 		});
 
 		preflight.on('close', (code) => {
@@ -737,25 +864,75 @@ async function ensureCliAvailable(cli: SupportedCli, workingDir: string): Promis
 			const details = `${stdout}\n${stderr}`.trim();
 			finish(
 				new Error(
-					`'${cli}' CLI is available but failed preflight with exit code ${code}${
+					`'${provider}' provider executable is available but failed preflight with exit code ${code}${
 						details ? `: ${details}` : ''
 					}`,
 				),
 			);
 		});
 	});
+
+	return commandPath;
 }
 
-function executeHeadlessCliSession(
-	cli: SupportedCli,
-	options: CliSessionOptions,
+export async function initializeProviderCapabilities(workingDir: string): Promise<void> {
+	const normalizedWorkingDir = validateWorkingDirectory(workingDir);
+
+	await Promise.all(
+		SUPPORTED_PROVIDERS.map(async (provider) => {
+			try {
+				const commandPath = await runProviderPreflight(provider, normalizedWorkingDir);
+				setProviderCapability(provider, {
+					status: 'working',
+					available: true,
+					checkedAt: new Date().toISOString(),
+					checkedBy: 'startup-preflight',
+					error: null,
+					commandPath,
+				});
+			} catch (error) {
+				markProviderCapabilityUnavailable(provider, error, 'startup-preflight');
+			}
+		}),
+	);
+}
+
+export async function ensureProviderCapabilityForSession(
+	provider: SupportedProvider,
+	workingDir: string,
+): Promise<void> {
+	validateWorkingDirectory(workingDir);
+
+	if (getProviderCapability(provider).status === 'working') {
+		return;
+	}
+
+	try {
+		const commandPath = ensureProviderExecutableExists(provider);
+		setProviderCapability(provider, {
+			status: 'working',
+			available: true,
+			checkedAt: new Date().toISOString(),
+			checkedBy: 'request-existence',
+			error: null,
+			commandPath,
+		});
+	} catch (error) {
+		markProviderCapabilityUnavailable(provider, error, 'request-existence');
+		throw error;
+	}
+}
+
+function executeHeadlessProviderSession(
+	provider: SupportedProvider,
+	options: ProviderSessionOptions,
 	errorPrefix: string,
-): Promise<HeadlessCliSession> {
+): Promise<HeadlessProviderSession> {
 	const { streamCallback } = options;
-	const command = buildCliCommand(cli, options);
+	const command = buildProviderCommand(provider, options);
 
 	return new Promise((resolve, reject) => {
-		const session: HeadlessCliSession = {
+		const session: HeadlessProviderSession = {
 			providerSessionId: options.providerSessionId || null,
 			process: null,
 			output: [],
@@ -772,8 +949,8 @@ function executeHeadlessCliSession(
 			env: { ...process.env },
 			stdio: ['ignore', 'pipe', 'pipe'],
 		});
-		const activeSession: ActiveHeadlessCliSession = {
-			cli,
+		const activeSession: ActiveHeadlessProviderSession = {
+			provider,
 			sessionId: options.sessionId || null,
 			providerSessionId: options.providerSessionId || null,
 			process: child,
@@ -855,7 +1032,7 @@ function executeHeadlessCliSession(
 				resolve(session);
 			} else {
 				session.status = 'error';
-				const errorMsg = `${cli} exited with code ${code}`;
+				const errorMsg = `${provider} exited with code ${code}`;
 				streamCallback?.({ type: 'error', content: errorMsg });
 				reject(new Error(errorMsg));
 			}
@@ -863,6 +1040,12 @@ function executeHeadlessCliSession(
 
 		child.on('error', (error) => {
 			unregisterActiveSession(activeSession);
+			if (
+				(error as NodeJS.ErrnoException).code === 'ENOENT' ||
+				(error as NodeJS.ErrnoException).code === 'EACCES'
+			) {
+				markProviderCapabilityUnavailable(provider, error, 'request-existence');
+			}
 
 			if (activeSession.cancelRequested) {
 				session.status = 'cancelled';
@@ -882,45 +1065,45 @@ function executeHeadlessCliSession(
 	});
 }
 
-export async function createHeadlessCliSession(
-	cli: SupportedCli,
+export async function createHeadlessProviderSession(
+	provider: SupportedProvider,
 	prompt: string,
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
 	sessionId?: string,
 	isDangerous = false,
-): Promise<HeadlessCliSession> {
+): Promise<HeadlessProviderSession> {
 	try {
 		validatePrompt(prompt);
 		workingDir = validateWorkingDirectory(workingDir);
-		await ensureCliAvailable(cli, workingDir);
+		await ensureProviderCapabilityForSession(provider, workingDir);
 	} catch (error) {
 		const errorMsg = error instanceof Error ? error.message : 'Validation error';
 		streamCallback?.({ type: 'error', content: errorMsg });
 		throw error;
 	}
 
-	return executeHeadlessCliSession(
-		cli,
+	return executeHeadlessProviderSession(
+		provider,
 		{ prompt, workingDir, model, streamCallback, sessionId, isDangerous },
-		`Failed to start ${cli}`,
+		`Failed to start ${provider}`,
 	);
 }
 
-export async function resumeHeadlessCliSession(
-	cli: SupportedCli,
+export async function resumeHeadlessProviderSession(
+	provider: SupportedProvider,
 	providerSessionId: string,
 	prompt: string | undefined,
 	workingDir: string,
 	model?: string,
 	streamCallback?: (data: StreamEvent) => void,
 	sessionId?: string,
-): Promise<HeadlessCliSession> {
+): Promise<HeadlessProviderSession> {
 	try {
 		prompt = normalizeResumePrompt(prompt);
 		workingDir = validateWorkingDirectory(workingDir);
-		await ensureCliAvailable(cli, workingDir);
+		await ensureProviderCapabilityForSession(provider, workingDir);
 
 		if (!providerSessionId || !isValidUUID(providerSessionId)) {
 			throw new Error('Invalid provider session ID format (must be a valid UUID)');
@@ -931,15 +1114,15 @@ export async function resumeHeadlessCliSession(
 		throw error;
 	}
 
-	return executeHeadlessCliSession(
-		cli,
+	return executeHeadlessProviderSession(
+		provider,
 		{ providerSessionId, prompt, workingDir, model, streamCallback, sessionId },
-		`Failed to resume ${cli} session`,
+		`Failed to resume ${provider} session`,
 	);
 }
 
 interface SocketSessionEventContext {
-	provider: SupportedCli;
+	provider: SupportedProvider;
 	sessionId: string;
 }
 
@@ -976,7 +1159,7 @@ function emitSessionEvent(
 }
 
 interface UnifiedSocketSessionCreatePayload extends SocketSessionPayload {
-	provider?: SupportedCli;
+	provider?: SupportedProvider;
 }
 
 interface UnifiedSocketSessionResumePayload extends SocketSessionPayload {
@@ -1008,10 +1191,7 @@ function persistConduitStreamEvent(captureContext: ConduitCaptureContext, stream
 	}
 }
 
-function finalizeSocketCapture(
-	captureContext: ConduitCaptureContext | null,
-	session: HeadlessCliSession,
-): void {
+function finalizeSocketCapture(captureContext: ConduitCaptureContext | null, session: HeadlessProviderSession): void {
 	if (!captureContext) {
 		return;
 	}
@@ -1047,14 +1227,14 @@ export function handleUnifiedSessionCancel(socket: Socket, eventPrefix = 'sessio
 			}
 
 			const resolvedSession = resolveConduitSession(requestedSessionId);
-			const result = cancelHeadlessCliSession({
-				cli: resolvedSession.cli,
+			const result = cancelHeadlessProviderSession({
+				provider: resolvedSession.provider,
 				sessionId: resolvedSession.sessionId,
 			});
 
 			socket.emit(`${eventPrefix}:cancel:update`, {
 				success: true,
-				provider: result.cli,
+				provider: result.provider,
 				sessionId: resolvedSession.sessionId,
 				status: result.status,
 			});
@@ -1071,12 +1251,12 @@ export function handleUnifiedSessionCancel(socket: Socket, eventPrefix = 'sessio
 export function handleUnifiedSessionCreate(socket: Socket, eventPrefix = 'session') {
 	socket.on(`${eventPrefix}:create`, async (data: UnifiedSocketSessionCreatePayload) => {
 		let captureContext: ConduitCaptureContext | null = null;
-		let cli: SupportedCli | null = null;
+		let provider: SupportedProvider | null = null;
 
 		try {
 			const { prompt, context, agentId, workspaceId, pipelineId } = data;
 
-			if (!isSupportedCli(data.provider)) {
+			if (!isSupportedProvider(data.provider)) {
 				socket.emit(`${eventPrefix}:error`, {
 					error: "provider is required and must be either 'claude' or 'codex'",
 				});
@@ -1112,9 +1292,10 @@ export function handleUnifiedSessionCreate(socket: Socket, eventPrefix = 'sessio
 				return;
 			}
 
-			cli = data.provider;
+			provider = data.provider;
+			await ensureProviderCapabilityForSession(provider, workspace.path);
 			captureContext = startConduitSessionCapture(
-				cli,
+				provider,
 				{ agentId, workspaceId, pipelineId },
 				prompt,
 				data.model,
@@ -1123,17 +1304,17 @@ export function handleUnifiedSessionCreate(socket: Socket, eventPrefix = 'sessio
 			);
 
 			const sessionContext = {
-				provider: cli,
+				provider,
 				sessionId: captureContext.sessionId,
 			};
 
 			socket.emit(`${eventPrefix}:started`, {
 				...sessionContext,
-				message: `${cli} session starting...`,
+				message: `${provider} session starting...`,
 			});
 
-			const session = await createHeadlessCliSession(
-				cli,
+			const session = await createHeadlessProviderSession(
+				provider,
 				prompt,
 				workspace.path,
 				data.model,
@@ -1155,7 +1336,7 @@ export function handleUnifiedSessionCreate(socket: Socket, eventPrefix = 'sessio
 			}
 
 			emitSessionError(socket, eventPrefix, error, {
-				provider: cli ?? undefined,
+				provider: provider ?? undefined,
 				sessionId: captureContext?.sessionId,
 			});
 		}
@@ -1165,7 +1346,7 @@ export function handleUnifiedSessionCreate(socket: Socket, eventPrefix = 'sessio
 export function handleUnifiedSessionResume(socket: Socket, eventPrefix = 'session') {
 	socket.on(`${eventPrefix}:resume`, async (data: UnifiedSocketSessionResumePayload) => {
 		let captureContext: ConduitCaptureContext | null = null;
-		let cli: SupportedCli | null = null;
+		let provider: SupportedProvider | null = null;
 		const requestedSessionId = data.sessionId;
 
 		try {
@@ -1221,14 +1402,15 @@ export function handleUnifiedSessionResume(socket: Socket, eventPrefix = 'sessio
 			}
 
 			const resolvedSession = resolveConduitSession(requestedSessionId);
-			cli = resolvedSession.cli;
+			provider = resolvedSession.provider;
+			await ensureProviderCapabilityForSession(provider, workspace.path);
 			const resumeTarget = {
 				providerSessionId: resolvedSession.providerSessionId,
 				sessionId: resolvedSession.sessionId,
 			};
 
 			captureContext = startConduitSessionCapture(
-				cli,
+				provider,
 				{ agentId, workspaceId, pipelineId },
 				normalizedPrompt,
 				data.model,
@@ -1238,17 +1420,17 @@ export function handleUnifiedSessionResume(socket: Socket, eventPrefix = 'sessio
 			);
 
 			const sessionContext = {
-				provider: cli,
+				provider,
 				sessionId: captureContext.sessionId,
 			};
 
 			socket.emit(`${eventPrefix}:started`, {
 				...sessionContext,
-				message: `Resuming ${cli} session...`,
+				message: `Resuming ${provider} session...`,
 			});
 
-			const session = await resumeHeadlessCliSessionWithFallback(
-				cli,
+			const session = await resumeHeadlessProviderSessionWithFallback(
+				provider,
 				resumeTarget,
 				normalizedPrompt,
 				workspace.path,
@@ -1270,7 +1452,7 @@ export function handleUnifiedSessionResume(socket: Socket, eventPrefix = 'sessio
 			}
 
 			emitSessionError(socket, eventPrefix, error, {
-				provider: cli ?? undefined,
+				provider: provider ?? undefined,
 				sessionId: typeof requestedSessionId === 'string' ? requestedSessionId : captureContext?.sessionId,
 			});
 		}

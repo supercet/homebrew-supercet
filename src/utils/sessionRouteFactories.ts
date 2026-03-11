@@ -2,23 +2,24 @@ import { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import {
 	beginConduitSessionCapture,
-	cancelHeadlessCliSession,
-	createHeadlessCliSession,
+	cancelHeadlessProviderSession,
+	createHeadlessProviderSession,
+	ensureProviderCapabilityForSession,
 	finalizeConduitSessionRun,
-	isSupportedCli,
+	isSupportedProvider,
 	isValidUUID,
 	resolveConduitSession,
-	resumeHeadlessCliSessionWithFallback,
+	resumeHeadlessProviderSessionWithFallback,
 	validateConduitSessionRequestMetadata,
 	type ConduitSessionCaptureHandle,
 	type ConduitSessionRequestMetadata,
 	type ResolvedResumeSessionTarget,
-	type SupportedCli,
-} from './headlessCliHelpers';
+	type SupportedProvider,
+} from './headlessProviderHelpers';
 import { resolveReadyWorkspaceForNewWork } from './workspaceReadiness';
 
 interface ValidatedSessionRequest {
-	cli: SupportedCli;
+	provider: SupportedProvider;
 	context?: string;
 	metadata: ConduitSessionRequestMetadata;
 	model?: string;
@@ -125,8 +126,8 @@ function resolveWorkspacePath(workspaceId: string): string {
 	return workspace.path;
 }
 
-function readRequiredProvider(value: unknown): SupportedCli {
-	if (!isSupportedCli(value)) {
+function readRequiredProvider(value: unknown): SupportedProvider {
+	if (!isSupportedProvider(value)) {
 		throw new SessionRouteError("provider is required and must be either 'claude' or 'codex'", 400);
 	}
 
@@ -137,7 +138,7 @@ function validateUnifiedCreateSessionRequest(body: Record<string, unknown>): Val
 	const metadata = validateRequestMetadata(body);
 
 	return {
-		cli: readRequiredProvider(body.provider),
+		provider: readRequiredProvider(body.provider),
 		context: readOptionalString(body.context, 'Context must be a string'),
 		metadata,
 		model: readOptionalString(body.model, 'Model must be a string'),
@@ -162,7 +163,7 @@ function validateUnifiedResumeSessionRequest(
 	}
 
 	return {
-		cli: resolvedSession.cli,
+		provider: resolvedSession.provider,
 		context: readOptionalString(body.context, 'Context must be a string'),
 		metadata,
 		model: readOptionalString(body.model, 'Model must be a string'),
@@ -178,6 +179,13 @@ function validateUnifiedResumeSessionRequest(
 function getSessionRunErrorStatus(message: string): ContentfulStatusCode {
 	if (message.includes('already has an active run')) {
 		return 409;
+	}
+
+	if (
+		message.includes('provider executable is not available on this system') ||
+		message.includes('command not found')
+	) {
+		return 503;
 	}
 
 	return 500;
@@ -207,9 +215,10 @@ export function createUnifiedCreateSessionRoute() {
 
 		try {
 			const request = validateUnifiedCreateSessionRequest(normalizeRequestBody(await c.req.json()));
+			await ensureProviderCapabilityForSession(request.provider, request.workspacePath);
 
 			captureHandle = beginConduitSessionCapture(
-				request.cli,
+				request.provider,
 				request.metadata,
 				request.prompt,
 				request.model,
@@ -217,8 +226,8 @@ export function createUnifiedCreateSessionRoute() {
 				request.context,
 			);
 
-			const session = await createHeadlessCliSession(
-				request.cli,
+			const session = await createHeadlessProviderSession(
+				request.provider,
 				request.prompt,
 				request.workspacePath,
 				request.model,
@@ -229,7 +238,7 @@ export function createUnifiedCreateSessionRoute() {
 				request.isDangerous,
 			);
 
-			return c.json(finalizeConduitSessionRun(request.cli, captureHandle, session));
+			return c.json(finalizeConduitSessionRun(request.provider, captureHandle, session));
 		} catch (error) {
 			if (error instanceof SessionRouteError) {
 				return c.json({ error: error.message }, error.status);
@@ -251,9 +260,10 @@ export function createUnifiedResumeSessionRoute() {
 				c.req.param('sessionId'),
 				normalizeRequestBody(await c.req.json()),
 			);
+			await ensureProviderCapabilityForSession(request.provider, request.workspacePath);
 
 			captureHandle = beginConduitSessionCapture(
-				request.cli,
+				request.provider,
 				request.metadata,
 				request.prompt,
 				request.model,
@@ -262,8 +272,8 @@ export function createUnifiedResumeSessionRoute() {
 				request.resumeTarget.sessionId || undefined,
 			);
 
-			const session = await resumeHeadlessCliSessionWithFallback(
-				request.cli,
+			const session = await resumeHeadlessProviderSessionWithFallback(
+				request.provider,
 				request.resumeTarget,
 				request.prompt,
 				request.workspacePath,
@@ -274,7 +284,7 @@ export function createUnifiedResumeSessionRoute() {
 				captureHandle.sessionId,
 			);
 
-			return c.json(finalizeConduitSessionRun(request.cli, captureHandle, session));
+			return c.json(finalizeConduitSessionRun(request.provider, captureHandle, session));
 		} catch (error) {
 			if (error instanceof SessionRouteError) {
 				return c.json({ error: error.message }, error.status);
@@ -292,15 +302,15 @@ export function createUnifiedCancelSessionRoute() {
 		try {
 			const sessionId = validateExternalSessionId(c.req.param('sessionId'));
 			const resolvedSession = resolveConduitSession(sessionId);
-			const result = cancelHeadlessCliSession({
-				cli: resolvedSession.cli,
+			const result = cancelHeadlessProviderSession({
+				provider: resolvedSession.provider,
 				sessionId: resolvedSession.sessionId,
 			});
 
 			return c.json(
 				{
 					success: true,
-					provider: result.cli,
+					provider: result.provider,
 					sessionId: resolvedSession.sessionId,
 					status: result.status,
 				},

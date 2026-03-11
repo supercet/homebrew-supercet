@@ -55,7 +55,9 @@ import {
 	handleUnifiedSessionCancel,
 	handleUnifiedSessionCreate,
 	handleUnifiedSessionResume,
-} from './utils/headlessCliHelpers';
+	initializeProviderCapabilities,
+	listProviderCapabilities,
+} from './utils/headlessProviderHelpers';
 import {
 	createUnifiedCancelSessionRoute,
 	createUnifiedCreateSessionRoute,
@@ -732,6 +734,9 @@ app.get('/api/heartbeat', (c) => {
 
 // SQLite routes
 app.get('/api/db/health', getDbHealth);
+app.get('/api/providers/capabilities', (c) => {
+	return c.json({ success: true, data: listProviderCapabilities() }, 200);
+});
 app.get('/api/sessions', getSessions);
 app.get('/api/sessions/:sessionId', getSession);
 
@@ -853,6 +858,7 @@ async function startServer() {
 	const initialWorkspace = registerWorkspace(process.cwd(), { requireGitRepo: true });
 	await refreshWorkspaceGitMetadata(initialWorkspace);
 	persistWorkspaceRecord(initialWorkspace);
+	await initializeProviderCapabilities(initialWorkspace.rootPath);
 
 	const restoredActiveWorkspace = persistedActiveWorkspaceId
 		? workspacesById.get(persistedActiveWorkspaceId) || null
