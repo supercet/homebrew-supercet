@@ -5,9 +5,9 @@ import {
 	cancelHeadlessCliSession,
 	createHeadlessCliSession,
 	finalizeConduitSessionRun,
+	isSupportedCli,
 	isValidUUID,
-	resolveResumeSessionTarget,
-	resolveSupportedCli,
+	resolveConduitSession,
 	resumeHeadlessCliSessionWithFallback,
 	validateConduitSessionRequestMetadata,
 	type ConduitSessionCaptureHandle,
@@ -16,11 +16,6 @@ import {
 	type SupportedCli,
 } from './headlessCliHelpers';
 import { resolveReadyWorkspaceForNewWork } from './workspaceReadiness';
-
-interface SessionRouteFactoryOptions {
-	defaultCli: SupportedCli;
-	allowCliOverride?: boolean;
-}
 
 interface ValidatedSessionRequest {
 	cli: SupportedCli;
@@ -51,10 +46,6 @@ class SessionRouteError extends Error {
 
 function getErrorMessage(error: unknown, fallback: string): string {
 	return error instanceof Error ? error.message : fallback;
-}
-
-function getRouteLogLabel(options: SessionRouteFactoryOptions): string {
-	return options.allowCliOverride ? 'CLI' : options.defaultCli === 'codex' ? 'Codex' : 'Claude';
 }
 
 function normalizeRequestBody(body: unknown): Record<string, unknown> {
@@ -97,9 +88,9 @@ function readOptionalBoolean(value: unknown, errorMessage: string): boolean | un
 	return value;
 }
 
-function validateSessionId(sessionId: string | undefined): string {
+function validateExternalSessionId(sessionId: string | undefined): string {
 	if (!sessionId || typeof sessionId !== 'string') {
-		throw new SessionRouteError('Session ID is required and must be a string', 400);
+		throw new SessionRouteError('sessionId is required and must be a string', 400);
 	}
 
 	if (!isValidUUID(sessionId)) {
@@ -134,67 +125,62 @@ function resolveWorkspacePath(workspaceId: string): string {
 	return workspace.path;
 }
 
-function resolveRouteCli(bodyCli: unknown, options: SessionRouteFactoryOptions): SupportedCli {
-	if (!options.allowCliOverride) {
-		return options.defaultCli;
+function readRequiredProvider(value: unknown): SupportedCli {
+	if (!isSupportedCli(value)) {
+		throw new SessionRouteError("provider is required and must be either 'claude' or 'codex'", 400);
 	}
 
-	try {
-		return resolveSupportedCli(bodyCli, options.defaultCli);
-	} catch (error) {
-		throw new SessionRouteError(getErrorMessage(error, 'Invalid cli'), 400);
-	}
+	return value;
 }
 
-function validateSharedSessionRequest(
-	body: Record<string, unknown>,
-	options: SessionRouteFactoryOptions,
-): ValidatedSessionRequest {
-	const model = readOptionalString(body.model, 'Model must be a string');
-	const context = readOptionalString(body.context, 'Context must be a string');
+function validateUnifiedCreateSessionRequest(body: Record<string, unknown>): ValidatedCreateSessionRequest {
 	const metadata = validateRequestMetadata(body);
 
 	return {
-		cli: resolveRouteCli(body.cli, options),
-		context,
+		cli: readRequiredProvider(body.provider),
+		context: readOptionalString(body.context, 'Context must be a string'),
 		metadata,
-		model,
+		model: readOptionalString(body.model, 'Model must be a string'),
 		workspacePath: resolveWorkspacePath(metadata.workspaceId),
-	};
-}
-
-function validateCreateSessionRequest(
-	body: Record<string, unknown>,
-	options: SessionRouteFactoryOptions,
-): ValidatedCreateSessionRequest {
-	return {
-		...validateSharedSessionRequest(body, options),
 		isDangerous: readOptionalBoolean(body.isDangerous, 'isDangerous must be a boolean') ?? false,
 		prompt: readRequiredString(body.prompt, 'Prompt is required and must be a string'),
 	};
 }
 
-function validateResumeSessionRequest(
+function validateUnifiedResumeSessionRequest(
 	sessionIdParam: string | undefined,
 	body: Record<string, unknown>,
-	options: SessionRouteFactoryOptions,
 ): ValidatedResumeSessionRequest {
-	const sessionId = validateSessionId(sessionIdParam);
-	const request = validateSharedSessionRequest(body, options);
-	const prompt = readOptionalString(body.prompt, 'Prompt must be a string when provided');
+	const sessionId = validateExternalSessionId(sessionIdParam);
+	const metadata = validateRequestMetadata(body);
 
-	let resumeTarget: ResolvedResumeSessionTarget;
+	let resolvedSession: ReturnType<typeof resolveConduitSession>;
 	try {
-		resumeTarget = resolveResumeSessionTarget(request.cli, sessionId);
+		resolvedSession = resolveConduitSession(sessionId);
 	} catch (error) {
-		throw new SessionRouteError(getErrorMessage(error, 'Invalid session ID'), 400);
+		throw new SessionRouteError(getErrorMessage(error, 'Invalid session ID'), 404);
 	}
 
 	return {
-		...request,
-		prompt,
-		resumeTarget,
+		cli: resolvedSession.cli,
+		context: readOptionalString(body.context, 'Context must be a string'),
+		metadata,
+		model: readOptionalString(body.model, 'Model must be a string'),
+		workspacePath: resolveWorkspacePath(metadata.workspaceId),
+		prompt: readOptionalString(body.prompt, 'Prompt must be a string when provided'),
+		resumeTarget: {
+			providerSessionId: resolvedSession.providerSessionId,
+			sessionId: resolvedSession.sessionId,
+		},
 	};
+}
+
+function getSessionRunErrorStatus(message: string): ContentfulStatusCode {
+	if (message.includes('already has an active run')) {
+		return 409;
+	}
+
+	return 500;
 }
 
 function getCancelErrorStatus(message: string): ContentfulStatusCode {
@@ -215,25 +201,12 @@ function failCapture(captureHandle: ConduitSessionCaptureHandle | null, error: u
 	return message;
 }
 
-export function createCancelSessionRoute(cli: SupportedCli) {
-	return async function cancelSession(c: Context) {
-		try {
-			const sessionId = validateSessionId(c.req.param('sessionId'));
-			const result = cancelHeadlessCliSession({ cli, sessionId });
-			return c.json({ success: true, ...result }, 200);
-		} catch (error) {
-			const message = getErrorMessage(error, 'Unknown error occurred');
-			return c.json({ success: false, error: message }, getCancelErrorStatus(message));
-		}
-	};
-}
-
-export function createCreateSessionRoute(options: SessionRouteFactoryOptions) {
+export function createUnifiedCreateSessionRoute() {
 	return async function createSession(c: Context) {
 		let captureHandle: ConduitSessionCaptureHandle | null = null;
 
 		try {
-			const request = validateCreateSessionRequest(normalizeRequestBody(await c.req.json()), options);
+			const request = validateUnifiedCreateSessionRequest(normalizeRequestBody(await c.req.json()));
 
 			captureHandle = beginConduitSessionCapture(
 				request.cli,
@@ -252,7 +225,7 @@ export function createCreateSessionRoute(options: SessionRouteFactoryOptions) {
 				(streamData) => {
 					captureHandle?.handleStreamEvent(streamData);
 				},
-				captureHandle.conduitSessionId,
+				captureHandle.sessionId,
 				request.isDangerous,
 			);
 
@@ -263,21 +236,20 @@ export function createCreateSessionRoute(options: SessionRouteFactoryOptions) {
 			}
 
 			const message = failCapture(captureHandle, error);
-			console.error(`Error creating ${getRouteLogLabel(options)} session:`, error);
-			return c.json({ success: false, error: message }, 500);
+			console.error('Error creating session:', error);
+			return c.json({ success: false, error: message }, getSessionRunErrorStatus(message));
 		}
 	};
 }
 
-export function createResumeSessionRoute(options: SessionRouteFactoryOptions) {
+export function createUnifiedResumeSessionRoute() {
 	return async function resumeSession(c: Context) {
 		let captureHandle: ConduitSessionCaptureHandle | null = null;
 
 		try {
-			const request = validateResumeSessionRequest(
+			const request = validateUnifiedResumeSessionRequest(
 				c.req.param('sessionId'),
 				normalizeRequestBody(await c.req.json()),
-				options,
 			);
 
 			captureHandle = beginConduitSessionCapture(
@@ -287,7 +259,7 @@ export function createResumeSessionRoute(options: SessionRouteFactoryOptions) {
 				request.model,
 				request.resumeTarget.providerSessionId || undefined,
 				request.context,
-				request.resumeTarget.conduitSessionId || undefined,
+				request.resumeTarget.sessionId || undefined,
 			);
 
 			const session = await resumeHeadlessCliSessionWithFallback(
@@ -299,7 +271,7 @@ export function createResumeSessionRoute(options: SessionRouteFactoryOptions) {
 				(streamData) => {
 					captureHandle?.handleStreamEvent(streamData);
 				},
-				captureHandle.conduitSessionId,
+				captureHandle.sessionId,
 			);
 
 			return c.json(finalizeConduitSessionRun(request.cli, captureHandle, session));
@@ -309,8 +281,40 @@ export function createResumeSessionRoute(options: SessionRouteFactoryOptions) {
 			}
 
 			const message = failCapture(captureHandle, error);
-			console.error(`Error resuming ${getRouteLogLabel(options)} session:`, error);
-			return c.json({ success: false, error: message }, 500);
+			console.error('Error resuming session:', error);
+			return c.json({ success: false, error: message }, getSessionRunErrorStatus(message));
+		}
+	};
+}
+
+export function createUnifiedCancelSessionRoute() {
+	return async function cancelSession(c: Context) {
+		try {
+			const sessionId = validateExternalSessionId(c.req.param('sessionId'));
+			const resolvedSession = resolveConduitSession(sessionId);
+			const result = cancelHeadlessCliSession({
+				cli: resolvedSession.cli,
+				sessionId: resolvedSession.sessionId,
+			});
+
+			return c.json(
+				{
+					success: true,
+					provider: result.cli,
+					sessionId: resolvedSession.sessionId,
+					status: result.status,
+				},
+				200,
+			);
+		} catch (error) {
+			const message = getErrorMessage(error, 'Unknown error occurred');
+			const status = message.startsWith('Unknown session ID')
+				? 404
+				: message === 'sessionId is required and must be a string' ||
+					  message === 'Invalid session ID format (must be a valid UUID)'
+					? 400
+					: getCancelErrorStatus(message);
+			return c.json({ success: false, error: message }, status);
 		}
 	};
 }
