@@ -1,14 +1,14 @@
 class Supercet < Formula
   desc "Supercet - A Node.js application for git operations"
   homepage "https://github.com/supercet/homebrew-supercet"
-  version "0.22.0"
-  url "https://github.com/supercet/homebrew-supercet/releases/download/v0.22.0/supercet-arm64"
-  sha256 "10fd6d5dbd6cf8c51c574d27bb332c7a422d5099baf4d89c0b61970226ff1cfe"
+  version "0.23.0"
+  url "https://github.com/supercet/homebrew-supercet/releases/download/v0.23.0/supercet-arm64"
+  sha256 "a909cfed44534bbec76779fd19bb04bceac1b8c8c7c1c3b169b31bca09838089"
   license "MIT"
 
   on_arm do
-    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.22.0/supercet-arm64"
-    sha256 "10fd6d5dbd6cf8c51c574d27bb332c7a422d5099baf4d89c0b61970226ff1cfe"
+    url "https://github.com/supercet/homebrew-supercet/releases/download/v0.23.0/supercet-arm64"
+    sha256 "a909cfed44534bbec76779fd19bb04bceac1b8c8c7c1c3b169b31bca09838089"
   end
 
   # on_intel do
