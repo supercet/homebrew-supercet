@@ -1,14 +1,14 @@
 class Autamo < Formula
   desc "Autamo - A Node.js application for git operations"
   homepage "https://autamo.ai"
-  version "0.72.2"
-  url "https://github.com/tryautamo/homebrew-autamo/releases/download/v0.72.2/autamo-arm64"
-  sha256 "7c5715c982f153daa8711068676a966511be69cc419ec884af4756e651e93625"
+  version "0.74.0"
+  url "https://github.com/tryautamo/homebrew-autamo/releases/download/v0.74.0/autamo-arm64"
+  sha256 "3a0ad7897c316f15080badde4cdf64cac634a8e8e98adfd36878fc096dce9b26"
   license "MIT"
 
   on_arm do
-    url "https://github.com/tryautamo/homebrew-autamo/releases/download/v0.72.2/autamo-arm64"
-    sha256 "7c5715c982f153daa8711068676a966511be69cc419ec884af4756e651e93625"
+    url "https://github.com/tryautamo/homebrew-autamo/releases/download/v0.74.0/autamo-arm64"
+    sha256 "3a0ad7897c316f15080badde4cdf64cac634a8e8e98adfd36878fc096dce9b26"
   end
 
   # on_intel do
