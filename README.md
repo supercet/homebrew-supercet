@@ -1,21 +1,21 @@
-# Supercet Homebrew Tap
+# Autamo Homebrew Tap
 
-This repository is the public Homebrew tap for [Supercet](supercet.com).
+This repository is the public Homebrew tap for [Autamo](https://autamo.ai).
 
-It contains the Homebrew formula used to install the `supercet` binary:
+It contains the Homebrew formula used to install the `autamo` binary:
 
 ## Install
 
 ```bash
-brew tap supercet/homebrew-supercet
-brew install supercet
+brew tap tryautamo/homebrew-autamo
+brew install autamo
 ```
 
 ## Upgrade
 
 ```bash
 brew update
-brew upgrade supercet
+brew upgrade autamo
 ```
 
 ## Notes
