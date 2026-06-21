@@ -7,9 +7,11 @@ It contains the Homebrew formula used to install the `autamo` binary:
 ## Install
 
 ```bash
-brew tap tryautamo/homebrew-autamo
-brew install autamo
+brew install tryautamo/tap/autamo
 ```
+
+Using the fully-qualified name installs (and implicitly trusts) just this
+formula, so it works on Homebrew 6.0+ without a separate `brew trust` step.
 
 ## Upgrade
 
