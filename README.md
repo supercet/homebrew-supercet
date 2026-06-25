@@ -22,5 +22,4 @@ brew upgrade autamo
 
 ## Notes
 
-- Release binaries are published to this repository's GitHub Releases.
 - This repository is intentionally minimal and exists to support Homebrew distribution.
