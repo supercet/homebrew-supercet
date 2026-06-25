@@ -23,8 +23,13 @@ class Autamo < Formula
   end
 
   livecheck do
-    url :stable
+    # The stable url points at Cloudflare R2 (tap.autamo.ai), so github_latest
+    # can't derive the repo from it — point it at the GitHub repo explicitly.
+    # Releases are tagged with the bare version (e.g. "0.77.4"); the optional "v"
+    # keeps older v-prefixed tags working too.
+    url "https://github.com/tryautamo/homebrew-tap"
     strategy :github_latest
+    regex(/^v?(\d+(?:\.\d+)+)$/i)
   end
 
   test do
